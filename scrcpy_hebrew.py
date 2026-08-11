@@ -761,7 +761,9 @@ def run_daemon():
     root = tk.Tk()
     root.title("scrcpy-hebrew")
     overlay = Overlay(root)
-    state = {"gone_since": 0.0}
+    # the launcher starts us *before* scrcpy, and scrcpy needs a moment to push
+    # its server and open a window - so never quit until we have seen one
+    state = {"gone_since": 0.0, "seen": False, "started": time.time()}
 
     def tick():
         daemon.idle_tick()
@@ -775,8 +777,9 @@ def run_daemon():
         except Exception as exc:
             dlog("overlay: %r" % exc)
         if scrcpy_running():
+            state["seen"] = True
             state["gone_since"] = 0.0
-        else:
+        elif state["seen"]:
             if not state["gone_since"]:
                 state["gone_since"] = time.time()
             elif time.time() - state["gone_since"] > 8:
@@ -784,6 +787,11 @@ def run_daemon():
                 daemon.stop.set()
                 root.destroy()
                 return
+        elif time.time() - state["started"] > 120:
+            log("scrcpy never showed up, exiting")
+            daemon.stop.set()
+            root.destroy()
+            return
         root.after(90, tick)
 
     root.after(200, tick)
