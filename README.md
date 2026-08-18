@@ -101,8 +101,8 @@ are (drop `--legacy-paste` if it is there).
 ```
 > python scrcpy_hebrew.py probe
 non-Latin layouts installed on this PC: he
-RF8M30D1YMN            uhid     hardware layouts: en, he
-ONQ8MVAEFMEYOJQK       paste    hardware layouts: none
+RF8M30D1YMN            Samsung S10      uhid     hardware layouts: en, he
+ONQ8MVAEFMEYOJQK       Redmi 9C         paste    hardware layouts: none
 ```
 
 If a phone reports `paste` and you would rather have the native `uhid` path, add
@@ -110,6 +110,31 @@ the language to the phone's on-screen keyboard, then start scrcpy once with
 `--keyboard=uhid` and set the layout under
 **Settings → General management → Physical keyboard → scrcpy**. Probe again and
 it will flip to `uhid`.
+
+### Window titles
+
+The window is titled with the phone as you call it - `Samsung S10`, not
+`SM_G973F [RF8M30D1YMN]`. The name is resolved in this order:
+
+1. `device-names.json` next to the script (or in
+   `%LOCALAPPDATA%\scrcpy-hebrew\`), a plain serial-to-name map:
+
+   ```json
+   {
+     "RF8M30D1YMN": "Samsung S10",
+     "ONQ8MVAEFMEYOJQK": "Redmi 9C"
+   }
+   ```
+
+   Copy `device-names.example.json` over it to start.
+2. the name set on the phone itself (Settings, "Device name" - a Galaxy S10
+   answers `Galaxy S10`),
+3. the vendor's marketing name (`ro.product.marketname`, which is what Xiaomi
+   fills in),
+4. manufacturer plus model code, as a last resort.
+
+The serial is appended only when two connected phones resolve to the same name.
+Passing your own `--window-title` still wins over all of it.
 
 ### Notes
 

@@ -46,6 +46,7 @@ Requires Windows, Python 3.8+, and scrcpy 2.4+ on PATH (or set SCRCPY_EXE).
 
 import ctypes
 import ctypes.wintypes as wt
+import json
 import os
 import queue
 import re
@@ -281,6 +282,74 @@ def connected_devices():
     return devices
 
 
+NAMES_FILES = (
+    os.path.join(LOG_DIR, "device-names.json"),
+    os.path.join(os.path.dirname(os.path.abspath(__file__)), "device-names.json"),
+)
+
+_NAME_CACHE = {}
+
+
+def name_overrides():
+    """{serial: 'Samsung S10'} - your own name for a phone, if you gave it one."""
+    for path in NAMES_FILES:
+        try:
+            with open(path, encoding="utf-8") as fh:
+                data = json.load(fh)
+        except Exception:
+            continue
+        if isinstance(data, dict):
+            return dict((str(k), str(v).strip()) for k, v in data.items()
+                        if str(v).strip())
+    return {}
+
+
+def _clean(value):
+    value = (value or "").strip()
+    return "" if value.lower() in ("", "null", "unknown") else value
+
+
+def device_name(serial, model=""):
+    """The phone as a human calls it - 'Samsung S10', not 'SM_G973F'.
+
+    device-names.json wins, then the name set on the phone itself, then the
+    marketing name the vendor ships, and only then the raw model code.
+    """
+    if not serial:
+        return _clean(model) or "device"
+    override = name_overrides().get(serial)
+    if override:
+        return override
+    if serial in _NAME_CACHE:
+        return _NAME_CACHE[serial]
+
+    name = _clean(adb(serial, "shell", "settings", "get", "global",
+                      "device_name"))
+    if not name:
+        for prop in ("ro.product.marketname", "ro.product.vendor.marketname",
+                     "ro.vendor.product.display"):
+            name = _clean(adb(serial, "shell", "getprop", prop))
+            if name:
+                break
+    if not name:
+        vendor = _clean(adb(serial, "shell", "getprop",
+                            "ro.product.manufacturer")).title()
+        board = (_clean(adb(serial, "shell", "getprop", "ro.product.model"))
+                 or _clean(model).replace("_", " "))
+        name = (vendor + " " + board).strip() if board else vendor
+    name = name or _clean(model).replace("_", " ") or serial
+    _NAME_CACHE[serial] = name
+    return name
+
+
+def window_title_for(serial, devices):
+    """device_name(), plus the serial only when two phones share a name."""
+    name = device_name(serial, devices.get(serial, ""))
+    clashes = [other for other in devices
+               if other != serial and device_name(other, devices[other]) == name]
+    return "%s [%s]" % (name, serial) if clashes else name
+
+
 SUBTYPE_RE = re.compile(r"mLanguageTag=([A-Za-z-]+).*?:\s*(\S*keyboard_layout_\S+)")
 
 
@@ -415,6 +484,7 @@ class Daemon:
         self.modes = {}                  # serial -> 'uhid' | 'paste'
         self.layouts = {}                # serial -> {tag: layout id}
         self.devices = {}                # serial -> model
+        self.names = {}                  # serial -> 'Samsung S10'
         self.sync_want = {}              # serial -> tag
         self.sync_lock = threading.Lock()
         self.tags = installed_non_latin_tags()
@@ -426,6 +496,8 @@ class Daemon:
             found = connected_devices()
             if found:
                 self.devices = found
+                self.names = dict((serial, device_name(serial, model))
+                                  for serial, model in found.items())
             for serial in list(self.devices):
                 if serial not in self.modes:
                     self.layouts[serial] = hardware_layouts(serial)
@@ -441,6 +513,9 @@ class Daemon:
         title = window_title(hwnd)
         for serial in self.devices:
             if serial in title:
+                return serial
+        for serial, name in self.names.items():
+            if name and name.lower() in title.lower():
                 return serial
         for serial, model in self.devices.items():
             if model and model.replace("_", " ") in title.replace("_", " "):
@@ -828,8 +903,7 @@ def run_launch(argv):
     if mode == "uhid" and not any(a.startswith("--keyboard") for a in args):
         args.append("--keyboard=uhid")
     if serial and not any(a.startswith("--window-title") for a in args):
-        args.append("--window-title=%s [%s]" % (devices.get(serial, "device"),
-                                                serial))
+        args.append("--window-title=%s" % window_title_for(serial, devices))
 
     print("scrcpy-hebrew: %s -> %s mode" % (serial or "?", mode))
 
@@ -855,8 +929,8 @@ def main():
         targets = rest or list(connected_devices())
         for serial in targets:
             have = hardware_layouts(serial)
-            print("%-22s %-8s hardware layouts: %s"
-                  % (serial, probe_mode(serial, tags),
+            print("%-22s %-16s %-8s hardware layouts: %s"
+                  % (serial, device_name(serial), probe_mode(serial, tags),
                      ", ".join(sorted(have)) or "none"))
         return 0
     print(__doc__)
