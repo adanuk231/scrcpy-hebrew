@@ -9,6 +9,7 @@
 //! actually do, buttons that do not need a restart, and magnetism between the
 //! windows so two phones can be handled as one slab.
 
+mod startup;
 mod win;
 
 use serde::{Deserialize, Serialize};
@@ -773,6 +774,24 @@ fn devices() -> Vec<(String, String, String)> {
 fn selftest(what: String) -> i32 {
     let board = Board::default();
 
+    if what == "autostart" {
+        let before = startup::enabled();
+        println!("enabled to begin with: {}", before);
+        if let Err(e) = startup::set(true) {
+            println!("could not enable: {}", e);
+            return 1;
+        }
+        println!("after enabling: {}", startup::enabled());
+        if let Err(e) = startup::set(false) {
+            println!("could not disable: {}", e);
+            return 1;
+        }
+        println!("after disabling: {}", startup::enabled());
+        let _ = startup::set(before);
+        println!("restored to: {}", startup::enabled());
+        return 0;
+    }
+
     if what == "readopt" {
         readopt(&board);
         let found: Vec<(String, isize)> = board
@@ -856,26 +875,159 @@ fn selftest(what: String) -> i32 {
     if survived { 0 } else { 1 }
 }
 
+// ------------------------------------------------------------ start-up ----
+
+#[tauri::command]
+fn autostart_state() -> bool {
+    startup::enabled()
+}
+
+#[tauri::command]
+fn set_autostart(on: bool) -> Result<bool, String> {
+    startup::set(on)?;
+    Ok(startup::enabled())
+}
+
+#[tauri::command]
+fn hide_board(app: tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.hide();
+    }
+}
+
+fn reveal(app: &tauri::AppHandle) {
+    if let Some(window) = app.get_webview_window("main") {
+        let _ = window.show();
+        let _ = window.unminimize();
+        let _ = window.set_focus();
+    }
+}
+
+/// The tray is the whole point of a strip you do not want in the way: the
+/// phones keep running whether the window is up or not, so the window can
+/// spend most of its life hidden.
+fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
+    use tauri::menu::{CheckMenuItem, Menu, MenuItem, PredefinedMenuItem};
+    use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+
+    let show = MenuItem::with_id(app, "show", "Show the board", true, None::<&str>)?;
+    let magnet = CheckMenuItem::with_id(
+        app, "magnet", "Magnet", true,
+        *app.state::<Board>().magnet.lock().unwrap(), None::<&str>)?;
+    let login = CheckMenuItem::with_id(
+        app, "login", "Start at login", true, startup::enabled(), None::<&str>)?;
+    let quit = MenuItem::with_id(app, "quit", "Quit (phones stay up)", true, None::<&str>)?;
+    let menu = Menu::with_items(
+        app,
+        &[&show, &PredefinedMenuItem::separator(app)?, &magnet, &login,
+          &PredefinedMenuItem::separator(app)?, &quit],
+    )?;
+
+    let mut tray = TrayIconBuilder::with_id("board")
+        .menu(&menu)
+        .tooltip("scrcpy board")
+        .show_menu_on_left_click(false)
+        .on_menu_event(|app, event| match event.id().as_ref() {
+            "show" => reveal(app),
+            "magnet" => {
+                let board = app.state::<Board>();
+                let mut on = board.magnet.lock().unwrap();
+                *on = !*on;
+                let _ = app.emit("magnet-changed", *on);
+            }
+            "login" => {
+                let want = !startup::enabled();
+                if let Err(e) = startup::set(want) {
+                    eprintln!("start at login: {}", e);
+                }
+                let _ = app.emit("autostart-changed", startup::enabled());
+            }
+            "quit" => app.exit(0),
+            _ => {}
+        })
+        .on_tray_icon_event(|tray, event| {
+            if let TrayIconEvent::Click {
+                button: MouseButton::Left,
+                button_state: MouseButtonState::Up,
+                ..
+            } = event
+            {
+                let app = tray.app_handle();
+                match app.get_webview_window("main") {
+                    Some(window) if window.is_visible().unwrap_or(false) => {
+                        let _ = window.hide();
+                    }
+                    _ => reveal(app),
+                }
+            }
+        });
+
+    if let Some(icon) = app.default_window_icon() {
+        tray = tray.icon(icon.clone());
+    }
+    tray.build(app)?;
+    Ok(())
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() > 2 && args[1] == "selftest" {
         std::process::exit(selftest(args[2].clone()));
     }
+    if args.len() > 2 && args[1] == "autostart" {
+        // whichever copy of the exe you run this from is the one registered
+        let on = args[2] == "on";
+        match startup::set(on) {
+            Ok(()) => {
+                println!("start at login: {}", if startup::enabled() { "on" } else { "off" });
+                std::process::exit(0);
+            }
+            Err(e) => {
+                println!("{}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+    let start_hidden = args.iter().any(|a| a == "--hidden");
+
+    if !startup::claim_only_copy() {
+        // a board is already up: bring that one forward rather than adding a
+        // second tray icon and a second magnet loop
+        let ours = std::process::id();
+        if let Some(hwnd) = win::window_of_other_instance("scrcpy-board.exe", ours) {
+            win::show_and_activate(hwnd);
+        }
+        std::process::exit(0);
+    }
+
     tauri::Builder::default()
         .manage(Board::default())
-        .setup(|app| {
+        .setup(move |app| {
             *app.state::<Board>().magnet.lock().unwrap() = true;
             readopt(&app.state::<Board>());
             start_daemon();
+            build_tray(app.handle())?;
+            if start_hidden {
+                if let Some(window) = app.get_webview_window("main") {
+                    let _ = window.hide();
+                }
+            }
             let handle = app.handle().clone();
             std::thread::spawn(move || magnet_loop(handle));
             Ok(())
         })
-        // deliberately no teardown on close: the phones are ordinary windows
-        // and outlive the strip that started them. adopt() picks them back up.
+        // closing the window only puts it away: the phones are ordinary
+        // windows and outlive the strip, and readopt() picks them up again
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                api.prevent_close();
+                let _ = window.hide();
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             probe, start, stop, running, set_skin, set_magnet, arrange,
-            focus_device, action, rotate, status, open_logs
+            focus_device, action, rotate, status, open_logs,
+            autostart_state, set_autostart, hide_board
         ])
         .run(tauri::generate_context!())
         .expect("board failed to start");

@@ -8,7 +8,7 @@ description = "A pedalboard for Android phones, built on scrcpy"
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = [] }
+tauri = { version = "2", features = ["tray-icon"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 raw-window-handle = "0.6"

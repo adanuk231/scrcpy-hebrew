@@ -110,6 +110,7 @@ const WS_EX_CLIENTEDGE: isize = 0x0000_0200;
 const WS_EX_DLGMODALFRAME: isize = 0x0000_0001;
 
 const SW_HIDE: i32 = 0;
+const SW_SHOW: i32 = 5;
 const SW_SHOWNA: i32 = 8;
 
 const SWP_NOMOVE: u32 = 0x0002;
@@ -128,6 +129,47 @@ struct Hunt {
     prefix: String,
     found: Vec<(isize, String)>,
     first_only: bool,
+}
+
+struct ExeHunt {
+    exe: String,
+    skip_pid: u32,
+    found: isize,
+}
+
+extern "system" fn exe_hunt_cb(hwnd: isize, param: isize) -> i32 {
+    unsafe {
+        let hunt = &mut *(param as *mut ExeHunt);
+        let mut pid: u32 = 0;
+        GetWindowThreadProcessId(hwnd, &mut pid);
+        if pid == hunt.skip_pid {
+            return 1;
+        }
+        let mut buf = [0u16; 8];
+        if GetWindowTextW(hwnd, buf.as_mut_ptr(), buf.len() as i32) == 0 {
+            return 1;                      // no title: not somebody's main window
+        }
+        if owner_exe(hwnd) == hunt.exe {
+            hunt.found = hwnd;
+            return 0;
+        }
+    }
+    1
+}
+
+/// Another copy of us, already running - hidden windows included, which is
+/// exactly the case that matters when the first copy started into the tray.
+pub fn window_of_other_instance(exe: &str, our_pid: u32) -> Option<isize> {
+    let mut hunt = ExeHunt { exe: exe.to_string(), skip_pid: our_pid, found: 0 };
+    unsafe { EnumWindows(exe_hunt_cb, &mut hunt as *mut ExeHunt as isize) };
+    if hunt.found == 0 { None } else { Some(hunt.found) }
+}
+
+pub fn show_and_activate(hwnd: isize) {
+    unsafe {
+        ShowWindow(hwnd, SW_SHOW);
+        SetForegroundWindow(hwnd);
+    }
 }
 
 extern "system" fn hunt_cb(hwnd: isize, param: isize) -> i32 {

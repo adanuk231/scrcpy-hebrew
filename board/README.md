@@ -87,6 +87,41 @@ cargo build --release
 The result is one exe. `cargo tauri build` will wrap it in an installer if you
 ever want one.
 
+## Tray, and starting with Windows
+
+The window is not the app. Closing it only puts it away - the phones keep
+running and the tray icon stays - and the tray menu has *Show the board*,
+*Magnet*, *Start at login* and *Quit (phones stay up)*. Left-clicking the icon
+toggles the window. The `-` chip in the header does the same thing as closing.
+
+*Start at login* writes one string to
+`HKCU\Software\Microsoft\Windows\CurrentVersion\Run`:
+
+```
+"<path to>\scrcpy-board.exe" --hidden
+```
+
+No installer, no scheduled task, no elevation, and turning it off deletes the
+value. `--hidden` means signing in gives you the tray icon rather than a window
+in the way. It can also be set without the UI:
+
+```
+scrcpy-board.exe autostart on
+scrcpy-board.exe autostart off
+```
+
+Whichever copy of the exe you run that from is the copy that gets registered,
+and the toggle reads back as off if the registered path is not this exe - so
+moving the exe and forgetting is visible rather than silent.
+
+**One copy only.** Started at login and then double-clicked is the ordinary way
+to end up with two tray icons and two magnet loops fighting over the same
+windows. A named mutex makes the second launch bring the first board forward
+and exit instead.
+
+(If you ever force-kill the board, Windows leaves a dead tray icon behind until
+you sweep the mouse over it. Quitting from the tray menu removes it properly.)
+
 ## Checking it without clicking anything
 
 The buttons are driven by the same functions as this, so it exercises the real
@@ -97,6 +132,7 @@ scrcpy-board.exe selftest <serial>   # one phone: start, park, close
 scrcpy-board.exe selftest all        # every phone, and assert they parked flush
 scrcpy-board.exe selftest keep       # every phone, left running
 scrcpy-board.exe selftest readopt    # pick up phones left running, then close
+scrcpy-board.exe selftest autostart  # the Run key round-trips and restores
 ```
 
 `keep` followed by `readopt` from a second process is the proof that phones

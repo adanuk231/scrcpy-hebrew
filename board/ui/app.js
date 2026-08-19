@@ -377,6 +377,26 @@ document.getElementById("ontop").addEventListener("click", async (e) => {
   await appWindow.setAlwaysOnTop(on);
 });
 
+document.getElementById("hide").addEventListener("click", () => invoke("hide_board"));
+
+const loginChip = document.getElementById("login");
+loginChip.addEventListener("click", async () => {
+  try {
+    const on = await invoke("set_autostart", { on: !loginChip.classList.contains("on") });
+    loginChip.classList.toggle("on", on);
+    say(on ? "starts with Windows, hidden in the tray" : "no longer starts with Windows");
+  } catch (err) {
+    say(String(err), true);
+  }
+});
+invoke("autostart_state").then((on) => loginChip.classList.toggle("on", on));
+
+// the tray can flip either of these behind the UI's back
+listen("autostart-changed", (e) => loginChip.classList.toggle("on", !!e.payload));
+listen("magnet-changed", (e) => {
+  document.getElementById("magnet").classList.toggle("on", !!e.payload);
+});
+
 document.getElementById("arrange").addEventListener("click", arrange);
 document.getElementById("logs").addEventListener("click", () => invoke("open_logs"));
 
