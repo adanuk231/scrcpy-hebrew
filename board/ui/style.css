@@ -1,0 +1,285 @@
+:root {
+  --ink: #e9edf6;
+  --dim: #8b96ad;
+  --bg: #0c0f16;
+  --panel: rgba(255, 255, 255, 0.045);
+  --edge: rgba(255, 255, 255, 0.09);
+  --live: #7ab2ff;
+  --warm: #ffd479;
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--ink);
+  font: 13px/1.35 "Segoe UI", system-ui, sans-serif;
+  user-select: none;
+  overflow: hidden;
+}
+
+body {
+  display: flex;
+  flex-direction: column;
+  background:
+    radial-gradient(120% 80% at 15% -10%, rgba(122, 178, 255, 0.10), transparent 60%),
+    radial-gradient(90% 60% at 110% 110%, rgba(255, 212, 121, 0.07), transparent 60%),
+    var(--bg);
+}
+
+/* ------------------------------------------------------------- chrome -- */
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--edge);
+  -webkit-app-region: drag;
+}
+
+.foot {
+  border-bottom: 0;
+  border-top: 1px solid var(--edge);
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.bar h1 {
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+  margin: 0 auto 0 0;
+  color: var(--dim);
+}
+
+.mark {
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  background: linear-gradient(140deg, var(--live), #2e3a52);
+  box-shadow: 0 0 0 1px var(--edge);
+}
+
+.chip {
+  -webkit-app-region: no-drag;
+  border: 1px solid var(--edge);
+  background: var(--panel);
+  color: var(--dim);
+  border-radius: 999px;
+  padding: 3px 10px;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.chip:hover { color: var(--ink); }
+
+.chip.on {
+  color: #0b0e14;
+  background: var(--live);
+  border-color: transparent;
+}
+
+.chip.ghost { padding: 3px 8px; }
+
+#note { margin-left: auto; }
+
+/* -------------------------------------------------------------- rack --- */
+
+#rack {
+  flex: 1;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+#rack::-webkit-scrollbar { width: 8px; }
+#rack::-webkit-scrollbar-thumb {
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+}
+
+.pedal {
+  border: 1px solid var(--edge);
+  border-radius: 14px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02));
+  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.06);
+  overflow: hidden;
+  transition: transform 0.14s ease, opacity 0.14s ease;
+}
+
+.pedal.live { border-color: rgba(122, 178, 255, 0.42); }
+.pedal.busy { opacity: 0.55; }
+.pedal.lifted {
+  transform: scale(1.02);
+  box-shadow: 0 16px 34px rgba(0, 0, 0, 0.5);
+  z-index: 3;
+  position: relative;
+}
+.pedal.gone { opacity: 0.4; }
+
+/* ------------------------------------------------------------- header -- */
+
+.grip {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 10px;
+  cursor: grab;
+  border-bottom: 1px solid var(--edge);
+}
+
+.grip:active { cursor: grabbing; }
+
+.dots {
+  width: 9px;
+  height: 14px;
+  flex: none;
+  background-image: radial-gradient(circle, var(--dim) 1px, transparent 1.2px);
+  background-size: 4px 4px;
+  opacity: 0.75;
+}
+
+.name {
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.badges {
+  display: flex;
+  gap: 4px;
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--dim);
+}
+
+.badges b {
+  font-weight: 500;
+  border: 1px solid var(--edge);
+  border-radius: 5px;
+  padding: 1px 5px;
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.badges b.uhid { color: var(--live); border-color: rgba(122, 178, 255, 0.35); }
+.badges b.low { color: var(--warm); border-color: rgba(255, 212, 121, 0.35); }
+
+.power {
+  flex: none;
+  width: 26px;
+  height: 26px;
+  border-radius: 50%;
+  border: 1px solid var(--edge);
+  background: rgba(0, 0, 0, 0.3);
+  color: var(--dim);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.power::after { content: "\25B6"; }
+.pedal.live .power {
+  color: #0b0e14;
+  background: var(--live);
+  border-color: transparent;
+}
+.pedal.live .power::after { content: "\25A0"; }
+
+/* -------------------------------------------------------------- knobs -- */
+
+.knobs { padding: 8px 10px 4px; display: flex; flex-direction: column; gap: 6px; }
+
+.row { display: flex; align-items: center; gap: 8px; }
+
+.row label {
+  width: 34px;
+  flex: none;
+  font-size: 11px;
+  color: var(--dim);
+}
+
+.seg {
+  display: flex;
+  flex: 1;
+  border: 1px solid var(--edge);
+  border-radius: 8px;
+  overflow: hidden;
+  background: rgba(0, 0, 0, 0.28);
+}
+
+.seg button {
+  flex: 1;
+  border: 0;
+  border-right: 1px solid var(--edge);
+  background: transparent;
+  color: var(--dim);
+  font: inherit;
+  font-size: 11px;
+  padding: 4px 0;
+  cursor: pointer;
+}
+
+.seg button:last-child { border-right: 0; }
+.seg button:hover:not(:disabled) { color: var(--ink); }
+.seg button.on { background: rgba(122, 178, 255, 0.18); color: var(--ink); }
+.seg button:disabled { opacity: 0.3; cursor: not-allowed; }
+
+.flags { flex-wrap: wrap; gap: 5px; }
+
+.flag {
+  border: 1px solid var(--edge);
+  background: rgba(0, 0, 0, 0.28);
+  color: var(--dim);
+  border-radius: 7px;
+  padding: 3px 8px;
+  font: inherit;
+  font-size: 11px;
+  cursor: pointer;
+}
+
+.flag:hover { color: var(--ink); }
+.flag.on { background: rgba(122, 178, 255, 0.18); color: var(--ink); border-color: rgba(122, 178, 255, 0.4); }
+
+/* --------------------------------------------------------------- pads -- */
+
+.pads {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  padding: 8px 10px 10px;
+}
+
+.pads button {
+  flex: 1;
+  border: 1px solid var(--edge);
+  background: rgba(0, 0, 0, 0.3);
+  color: var(--dim);
+  border-radius: 8px;
+  padding: 5px 0;
+  font: inherit;
+  cursor: pointer;
+}
+
+.pads button:hover { color: var(--ink); background: rgba(255, 255, 255, 0.06); }
+.pads button:active { transform: translateY(1px); }
+.pads button.warm:hover { color: var(--warm); }
+.pads .gap { width: 6px; flex: none; }
+
+.why {
+  margin: 0;
+  padding: 0 10px 9px;
+  font-size: 11px;
+  color: var(--warm);
+  min-height: 0;
+}
+
+.why:empty { display: none; }

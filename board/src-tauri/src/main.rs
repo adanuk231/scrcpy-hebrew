@@ -1,0 +1,882 @@
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
+//! scrcpy board - a small control strip for phones that stay ordinary windows.
+//!
+//! The board never takes the picture away from scrcpy and never puts it in a
+//! frame of its own: every phone is a normal scrcpy window you can move,
+//! resize and alt-tab like anything else. What the board adds is the things
+//! scrcpy has no room for - what each phone was started with, what it can
+//! actually do, buttons that do not need a restart, and magnetism between the
+//! windows so two phones can be handled as one slab.
+
+mod win;
+
+use serde::{Deserialize, Serialize};
+use std::collections::{HashMap, HashSet};
+use std::io::Write;
+use std::os::windows::process::CommandExt;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
+
+use tauri::{Emitter, Manager, State};
+
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+const DETACHED: u32 = 0x0000_0008;
+
+/// how close two edges have to be before they click together
+const SNAP: i32 = 26;
+/// how close counts as already stuck together
+const TOUCHING: i32 = 6;
+/// how far a window will travel to line up with one it has just joined
+const ALIGN: i32 = 90;
+
+// ---------------------------------------------------------------- state ----
+
+struct Pedal {
+    child: Option<Child>,
+    hwnd: isize,
+    skin: bool,
+    last: win::Rect,
+}
+
+#[derive(Default)]
+struct Board {
+    pedals: Mutex<HashMap<String, Pedal>>,
+    magnet: Mutex<bool>,
+}
+
+// ------------------------------------------------------------- plumbing ----
+
+fn run(program: &str, args: &[&str]) -> Result<String, String> {
+    let out = Command::new(program)
+        .args(args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("{}: {}", program, e))?;
+    if !out.status.success() && out.stdout.is_empty() {
+        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+}
+
+/// scrcpy_hebrew.py lives above the app; in a dev build the exe is buried
+/// under target/, so walk up until it turns up.
+fn engine() -> Option<PathBuf> {
+    if let Ok(p) = std::env::var("SCRCPY_HEBREW") {
+        let p = PathBuf::from(p);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    let mut roots: Vec<PathBuf> = Vec::new();
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            roots.push(dir.to_path_buf());
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        roots.push(cwd);
+    }
+    for root in roots {
+        let mut here: &Path = &root;
+        for _ in 0..7 {
+            let candidate = here.join("scrcpy_hebrew.py");
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+            match here.parent() {
+                Some(up) => here = up,
+                None => break,
+            }
+        }
+    }
+    None
+}
+
+fn python(windowless: bool) -> (String, Vec<String>) {
+    // the py launcher is the reliable way in; pyw is its windowless twin
+    let launcher = if windowless { "pyw" } else { "py" };
+    let ok = Command::new(launcher)
+        .arg("--version")
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok();
+    if ok {
+        return (launcher.to_string(), vec!["-3".to_string()]);
+    }
+    let fallback = if windowless { "pythonw" } else { "python" };
+    (fallback.to_string(), vec![])
+}
+
+fn scrcpy_exe() -> String {
+    if let Ok(p) = std::env::var("SCRCPY_EXE") {
+        return p;
+    }
+    // the chocolatey shim works too, but the real binary keeps the pid and the
+    // window in one process, which is one less thing to guess about
+    let choco = "C:\\ProgramData\\chocolatey\\lib\\scrcpy\\tools\\scrcpy.exe";
+    if Path::new(choco).is_file() {
+        return choco.to_string();
+    }
+    "scrcpy".to_string()
+}
+
+fn local_dir() -> PathBuf {
+    let base = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| ".".to_string());
+    PathBuf::from(base).join("scrcpy-hebrew")
+}
+
+/// Tell the Hebrew daemon which phone each window belongs to, so it never has
+/// to guess from a window title.
+fn publish_windows(pedals: &HashMap<String, Pedal>) {
+    let map: HashMap<String, String> = pedals
+        .iter()
+        .filter(|(_, p)| p.hwnd != 0)
+        .map(|(serial, p)| (p.hwnd.to_string(), serial.clone()))
+        .collect();
+    let dir = local_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    if let Ok(text) = serde_json::to_string_pretty(&map) {
+        if let Ok(mut fh) = std::fs::File::create(dir.join("windows.json")) {
+            let _ = fh.write_all(text.as_bytes());
+        }
+    }
+}
+
+// --------------------------------------------------------------- magnet ----
+
+fn overlaps(a1: i32, a2: i32, b1: i32, b2: i32) -> bool {
+    a1.min(a2) < b1.max(b2) && b1.min(b2) < a1.max(a2)
+}
+
+/// Are these two windows stuck to each other right now?
+fn adjacent(a: &win::Rect, b: &win::Rect) -> bool {
+    let vertical = overlaps(a.top, a.bottom, b.top, b.bottom)
+        && ((a.right - b.left).abs() <= TOUCHING || (b.right - a.left).abs() <= TOUCHING);
+    let horizontal = overlaps(a.left, a.right, b.left, b.right)
+        && ((a.bottom - b.top).abs() <= TOUCHING || (b.bottom - a.top).abs() <= TOUCHING);
+    vertical || horizontal
+}
+
+/// Everything stuck to `seed`, directly or through another phone.
+fn cluster(seed: &str, rects: &HashMap<String, win::Rect>) -> HashSet<String> {
+    let mut group: HashSet<String> = HashSet::new();
+    group.insert(seed.to_string());
+    loop {
+        let mut grew = false;
+        for (serial, rect) in rects {
+            if group.contains(serial) {
+                continue;
+            }
+            if group.iter().any(|m| rects.get(m).map_or(false, |r| adjacent(r, rect))) {
+                group.insert(serial.clone());
+                grew = true;
+            }
+        }
+        if !grew {
+            return group;
+        }
+    }
+}
+
+/// The offset that would click `moving` onto one of `others` or onto the edge
+/// of the screen, if anything is close enough.
+fn snap_offset(moving: &win::Rect, others: &[win::Rect], area: &win::Rect) -> (i32, i32) {
+    // two kinds of candidate: a join, where an edge meets an edge, and an
+    // alignment, where two windows merely line up. Joins win, and once one
+    // has happened the alignment on the other axis is allowed a longer reach -
+    // phones put shoulder to shoulder should end up flush, not stepped.
+    let mut xs: Vec<(i32, bool)> = Vec::new();
+    let mut ys: Vec<(i32, bool)> = Vec::new();
+
+    for o in others {
+        if overlaps(moving.top, moving.bottom, o.top, o.bottom) {
+            xs.push((o.left - moving.right, true));
+            xs.push((o.right - moving.left, true));
+            ys.push((o.top - moving.top, false));
+            ys.push((o.bottom - moving.bottom, false));
+        }
+        if overlaps(moving.left, moving.right, o.left, o.right) {
+            ys.push((o.top - moving.bottom, true));
+            ys.push((o.bottom - moving.top, true));
+            xs.push((o.left - moving.left, false));
+            xs.push((o.right - moving.right, false));
+        }
+    }
+    xs.push((area.left - moving.left, false));
+    xs.push((area.right - moving.right, false));
+    ys.push((area.top - moving.top, false));
+    ys.push((area.bottom - moving.bottom, false));
+
+    let (dx, joined_x) = choose(&xs, SNAP, SNAP);
+    let (dy, joined_y) = choose(&ys, SNAP, if joined_x { ALIGN } else { SNAP });
+    if joined_y && !joined_x {
+        let (dx, _) = choose(&xs, SNAP, ALIGN);
+        return (dx, dy);
+    }
+    (dx, dy)
+}
+
+fn choose(candidates: &[(i32, bool)], join_limit: i32, align_limit: i32) -> (i32, bool) {
+    let mut best: Option<(i32, bool)> = None;
+    for (gap, is_join) in candidates {
+        let limit = if *is_join { join_limit } else { align_limit };
+        if gap.abs() > limit {
+            continue;
+        }
+        let better = match best {
+            None => true,
+            Some((chosen, chosen_join)) => {
+                (*is_join && !chosen_join)
+                    || (*is_join == chosen_join && gap.abs() < chosen.abs())
+            }
+        };
+        if better {
+            best = Some((*gap, *is_join));
+        }
+    }
+    best.unwrap_or((0, false))
+}
+
+/// Watches the phone windows. While one is being dragged its neighbours come
+/// along; when it is dropped it clicks onto whatever it was near.
+fn magnet_loop(app: tauri::AppHandle) {
+    let mut dragging: Option<String> = None;
+    let mut travelling: HashSet<String> = HashSet::new();
+
+    loop {
+        std::thread::sleep(Duration::from_millis(40));
+        let board = app.state::<Board>();
+        let on = *board.magnet.lock().unwrap();
+        let mut pedals = board.pedals.lock().unwrap();
+
+        // current geometry, dropping anything that has gone away
+        let mut rects: HashMap<String, win::Rect> = HashMap::new();
+        let mut lost: Vec<String> = Vec::new();
+        for (serial, pedal) in pedals.iter() {
+            match win::rect_of(pedal.hwnd) {
+                Some(r) if win::is_window(pedal.hwnd) && !win::is_minimised(pedal.hwnd) => {
+                    rects.insert(serial.clone(), r);
+                }
+                _ => {
+                    if !win::is_window(pedal.hwnd) {
+                        lost.push(serial.clone());
+                    }
+                }
+            }
+        }
+        if !lost.is_empty() {
+            for serial in &lost {
+                pedals.remove(serial);
+            }
+            publish_windows(&pedals);
+            let _ = app.emit("pedals-changed", &lost);
+        }
+
+        let down = win::mouse_down();
+        if !on {
+            for (serial, r) in &rects {
+                if let Some(p) = pedals.get_mut(serial) {
+                    p.last = *r;
+                }
+            }
+            continue;
+        }
+
+        if down && dragging.is_none() {
+            // whichever phone is both foreground and has just moved
+            let fg = win::foreground();
+            if let Some((serial, _)) = pedals
+                .iter()
+                .find(|(s, p)| p.hwnd == fg && rects.get(*s).map_or(false, |r| *r != p.last))
+            {
+                let serial = serial.clone();
+                travelling = cluster(&serial, &rects);
+                travelling.remove(&serial);
+                dragging = Some(serial);
+            }
+        }
+
+        if let Some(serial) = dragging.clone() {
+            let (dx, dy) = match (rects.get(&serial), pedals.get(&serial)) {
+                (Some(now), Some(p)) => (now.left - p.last.left, now.top - p.last.top),
+                _ => (0, 0),
+            };
+            if dx != 0 || dy != 0 {
+                for mate in travelling.iter() {
+                    if let (Some(r), Some(p)) = (rects.get(mate), pedals.get(mate)) {
+                        win::move_to(p.hwnd, r.left + dx, r.top + dy);
+                    }
+                }
+            }
+            if !down {
+                // dropped: click onto the nearest edge and bring the group
+                if let Some(now) = win::rect_of(pedals[&serial].hwnd) {
+                    let others: Vec<win::Rect> = rects
+                        .iter()
+                        .filter(|(s, _)| **s != serial && !travelling.contains(*s))
+                        .map(|(_, r)| *r)
+                        .collect();
+                    let area = win::work_area();
+                    let (sx, sy) = snap_offset(&now, &others, &area);
+                    if sx != 0 || sy != 0 {
+                        win::move_to(pedals[&serial].hwnd, now.left + sx, now.top + sy);
+                        for mate in travelling.iter() {
+                            if let (Some(r), Some(p)) = (rects.get(mate), pedals.get(mate)) {
+                                win::move_to(p.hwnd, r.left + sx, r.top + sy);
+                            }
+                        }
+                    }
+                }
+                dragging = None;
+                travelling.clear();
+            }
+        }
+
+        for pedal in pedals.values_mut() {
+            if let Some(r) = win::rect_of(pedal.hwnd) {
+                pedal.last = r;
+            }
+        }
+    }
+}
+
+// ------------------------------------------------------------- commands ----
+
+#[tauri::command]
+fn probe() -> Result<serde_json::Value, String> {
+    let script = engine().ok_or("scrcpy_hebrew.py not found next to the app")?;
+    let (exe, pre) = python(false);
+    let mut args: Vec<String> = pre;
+    args.push(script.to_string_lossy().to_string());
+    args.push("capabilities".to_string());
+    let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+    let out = run(&exe, &refs)?;
+    serde_json::from_str(&out).map_err(|e| format!("{}: {}", e, out))
+}
+
+#[derive(Deserialize, Clone, Debug)]
+struct Opts {
+    audio: String,
+    keyboard: String,
+    max_size: u32,
+    max_fps: u32,
+    stay_awake: bool,
+    screen_off: bool,
+    show_touches: bool,
+    view_only: bool,
+    skin: bool,
+    height: u32,
+    name: String,
+}
+
+fn scrcpy_args(serial: &str, title: &str, o: &Opts) -> Vec<String> {
+    let mut a: Vec<String> = vec![
+        "-s".into(),
+        serial.into(),
+        format!("--window-title={}", title),
+        format!("--window-height={}", o.height.max(240)),
+        // born off-screen, so nothing flashes in the middle of the desktop
+        "--window-x=-6000".into(),
+        "--window-y=-6000".into(),
+    ];
+    if o.skin {
+        a.push("--window-borderless".into());
+    }
+    if o.keyboard == "uhid" {
+        a.push("--keyboard=uhid".into());
+    }
+    match o.audio.as_str() {
+        "output" => a.push("--audio-source=output".into()),
+        "dup" => {
+            a.push("--audio-source=playback".into());
+            a.push("--audio-dup".into());
+        }
+        _ => a.push("--no-audio".into()),
+    }
+    if o.max_size > 0 {
+        a.push(format!("--max-size={}", o.max_size));
+    }
+    if o.max_fps > 0 {
+        a.push(format!("--max-fps={}", o.max_fps));
+    }
+    if o.stay_awake {
+        a.push("--stay-awake".into());
+    }
+    if o.screen_off {
+        a.push("--turn-screen-off".into());
+    }
+    if o.show_touches {
+        a.push("--show-touches".into());
+    }
+    if o.view_only {
+        a.push("--no-control".into());
+    }
+    a
+}
+
+#[derive(Serialize)]
+struct Started {
+    serial: String,
+    hwnd: String,
+    args: Vec<String>,
+}
+
+/// Where a new phone should land: to the right of the phones already out, so
+/// starting two in a row gives you a magnetised pair without touching them.
+fn parking_spot(rects: &[win::Rect], w: i32, h: i32) -> (i32, i32) {
+    let area = win::work_area();
+    let mut x = area.left + 24;
+    let y = area.top + 24;
+    for r in rects {
+        if r.top < y + h && r.bottom > y {
+            x = x.max(r.right);
+        }
+    }
+    if x + w > area.right {
+        x = area.left + 24;
+    }
+    (x, y)
+}
+
+#[tauri::command]
+fn start(state: State<Board>, serial: String, opts: Opts) -> Result<Started, String> {
+    start_inner(&state, serial, opts)
+}
+
+fn start_inner(board: &Board, serial: String, opts: Opts) -> Result<Started, String> {
+    stop_inner(board, &serial);
+
+    start_daemon();
+
+    let title = format!("scrcpyboard-{}", serial);
+    let args = scrcpy_args(&serial, &title, &opts);
+    let dir = local_dir();
+    let _ = std::fs::create_dir_all(&dir);
+    let log = dir.join(format!("board-{}.log", serial));
+    let sink = std::fs::File::create(&log).map_err(|e| e.to_string())?;
+    let sink2 = sink.try_clone().map_err(|e| e.to_string())?;
+
+    let mut child = Command::new(scrcpy_exe())
+        .args(&args)
+        .creation_flags(CREATE_NO_WINDOW)
+        .stdin(Stdio::null())
+        .stdout(Stdio::from(sink))
+        .stderr(Stdio::from(sink2))
+        .spawn()
+        .map_err(|e| format!("could not start scrcpy: {}", e))?;
+
+    let deadline = Instant::now() + Duration::from_secs(25);
+    let mut hwnd = 0isize;
+    while Instant::now() < deadline {
+        if let Some(found) = win::find_by_title(&title) {
+            hwnd = found;
+            break;
+        }
+        if let Ok(Some(_)) = child.try_wait() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(120));
+    }
+    if hwnd == 0 {
+        let _ = child.kill();
+        let tail = std::fs::read_to_string(&log).unwrap_or_default();
+        let tail = tail
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .rev()
+            .take(3)
+            .collect::<Vec<_>>()
+            .join(" / ");
+        return Err(format!("scrcpy never opened a window. {}", tail));
+    }
+
+    // the unique title was only ever a handle; show the phone's name
+    win::rename(hwnd, if opts.name.is_empty() { &serial } else { &opts.name });
+
+    let size = win::rect_of(hwnd).unwrap_or_default();
+    let taken: Vec<win::Rect> = {
+        let pedals = board.pedals.lock().unwrap();
+        pedals.values().filter_map(|p| win::rect_of(p.hwnd)).collect()
+    };
+    let (x, y) = parking_spot(&taken, size.w(), size.h());
+    win::move_to(hwnd, x, y);
+    if opts.skin {
+        win::round_corners(hwnd, 34);
+    }
+    win::show(hwnd, true);
+    win::activate(hwnd);
+
+    let last = win::rect_of(hwnd).unwrap_or_default();
+    let mut pedals = board.pedals.lock().unwrap();
+    pedals.insert(
+        serial.clone(),
+        Pedal { child: Some(child), hwnd, skin: opts.skin, last },
+    );
+    publish_windows(&pedals);
+
+    Ok(Started { serial, hwnd: hwnd.to_string(), args })
+}
+
+fn stop_inner(board: &Board, serial: &str) {
+    let mut pedals = board.pedals.lock().unwrap();
+    if let Some(mut pedal) = pedals.remove(serial) {
+        // ask first, so scrcpy turns the phone's screen back on and tidies up
+        if win::is_window(pedal.hwnd) {
+            win::ask_to_close(pedal.hwnd);
+            let deadline = Instant::now() + Duration::from_millis(1800);
+            while Instant::now() < deadline && win::is_window(pedal.hwnd) {
+                std::thread::sleep(Duration::from_millis(60));
+            }
+        }
+        if let Some(child) = pedal.child.as_mut() {
+            if matches!(child.try_wait(), Ok(None)) {
+                let _ = child.kill();
+            }
+            let _ = child.wait();
+        }
+    }
+    publish_windows(&pedals);
+}
+
+#[tauri::command]
+fn stop(state: State<Board>, serial: String) -> Result<(), String> {
+    stop_inner(&state, &serial);
+    Ok(())
+}
+
+#[tauri::command]
+fn running(state: State<Board>) -> Vec<String> {
+    let pedals = state.pedals.lock().unwrap();
+    pedals
+        .iter()
+        .filter(|(_, p)| win::is_window(p.hwnd))
+        .map(|(serial, _)| serial.clone())
+        .collect()
+}
+
+/// The one thing scrcpy cannot do on its own: put a rounded, frameless skin on
+/// a window that is already running.
+#[tauri::command]
+fn set_skin(state: State<Board>, serial: String, on: bool) -> Result<(), String> {
+    let mut pedals = state.pedals.lock().unwrap();
+    let pedal = pedals.get_mut(&serial).ok_or("that phone is not running")?;
+    win::chromeless(pedal.hwnd, on);
+    if on {
+        win::round_corners(pedal.hwnd, 34);
+    } else {
+        win::square_corners(pedal.hwnd);
+    }
+    pedal.skin = on;
+    Ok(())
+}
+
+#[tauri::command]
+fn set_magnet(state: State<Board>, on: bool) {
+    *state.magnet.lock().unwrap() = on;
+}
+
+/// Line the phones up in the given order and stick them together.
+#[tauri::command]
+fn arrange(state: State<Board>, order: Vec<String>) {
+    let pedals = state.pedals.lock().unwrap();
+    let area = win::work_area();
+    let mut x = area.left + 24;
+    let y = area.top + 24;
+    for serial in order {
+        if let Some(pedal) = pedals.get(&serial) {
+            if let Some(r) = win::rect_of(pedal.hwnd) {
+                win::move_to(pedal.hwnd, x, y);
+                x += r.w();
+            }
+        }
+    }
+}
+
+#[tauri::command]
+fn focus_device(state: State<Board>, serial: String) {
+    let pedals = state.pedals.lock().unwrap();
+    if let Some(pedal) = pedals.get(&serial) {
+        win::activate(pedal.hwnd);
+    }
+}
+
+/// Live buttons. These deliberately go through adb rather than through
+/// scrcpy's own shortcuts: no restart, no key-injection guesswork, and they
+/// still work on a phone running with --no-control.
+#[tauri::command]
+fn action(serial: String, what: String) -> Result<String, String> {
+    let key = match what.as_str() {
+        "back" => "4",
+        "home" => "3",
+        "recents" => "187",
+        "power" => "26",
+        "volume_up" => "24",
+        "volume_down" => "25",
+        "wake" => "224",
+        "sleep" => "223",
+        "notifications" => "83",
+        _ => return Err(format!("unknown action {}", what)),
+    };
+    run("adb", &["-s", &serial, "shell", "input", "keyevent", key])
+}
+
+#[tauri::command]
+fn rotate(serial: String, locked: bool, landscape: bool) -> Result<String, String> {
+    let accel = if locked { "0" } else { "1" };
+    run(
+        "adb",
+        &["-s", &serial, "shell", "settings", "put", "system",
+          "accelerometer_rotation", accel],
+    )?;
+    if locked {
+        let value = if landscape { "1" } else { "0" };
+        return run(
+            "adb",
+            &["-s", &serial, "shell", "settings", "put", "system",
+              "user_rotation", value],
+        );
+    }
+    Ok(String::new())
+}
+
+#[derive(Serialize)]
+struct Status {
+    battery: i32,
+    charging: bool,
+}
+
+#[tauri::command]
+fn status(serial: String) -> Result<Status, String> {
+    let dump = run("adb", &["-s", &serial, "shell", "dumpsys", "battery"])?;
+    let mut battery = -1;
+    let mut charging = false;
+    for line in dump.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("level:") {
+            battery = rest.trim().parse().unwrap_or(-1);
+        } else if let Some(rest) = line.strip_prefix("AC powered:") {
+            charging |= rest.trim() == "true";
+        } else if let Some(rest) = line.strip_prefix("USB powered:") {
+            charging |= rest.trim() == "true";
+        }
+    }
+    Ok(Status { battery, charging })
+}
+
+#[tauri::command]
+fn open_logs() {
+    let _ = Command::new("explorer")
+        .arg(local_dir())
+        .creation_flags(CREATE_NO_WINDOW)
+        .spawn();
+}
+
+// ----------------------------------------------------------------- main ----
+
+/// Windows left over from an earlier run of the board, or from a board that
+/// was closed while the phones stayed out.
+fn readopt(board: &Board) {
+    let path = local_dir().join("windows.json");
+    let text = match std::fs::read_to_string(path) {
+        Ok(t) => t,
+        Err(_) => return,
+    };
+    let map: HashMap<String, String> = match serde_json::from_str(&text) {
+        Ok(m) => m,
+        Err(_) => return,
+    };
+    let mut pedals = board.pedals.lock().unwrap();
+    for (hwnd, serial) in map {
+        let hwnd: isize = match hwnd.parse() {
+            Ok(h) => h,
+            Err(_) => continue,
+        };
+        // a handle alone proves nothing: it may have been recycled since we
+        // wrote it down, and closing a stranger's window would be unforgivable
+        if !win::is_window(hwnd) || win::owner_exe(hwnd) != "scrcpy.exe" {
+            continue;
+        }
+        let last = win::rect_of(hwnd).unwrap_or_default();
+        pedals.insert(serial, Pedal { child: None, hwnd, skin: false, last });
+    }
+    publish_windows(&pedals);
+}
+
+fn start_daemon() {
+    if let Some(script) = engine() {
+        let (exe, pre) = python(true);
+        let _ = Command::new(exe)
+            .args(pre)
+            .arg(script)
+            .arg("daemon")
+            .creation_flags(CREATE_NO_WINDOW | DETACHED)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+    }
+}
+
+/// `scrcpy-board.exe selftest <what>` drives start, park, magnet and stop
+/// through the same functions the buttons call - no window, no clicking.
+///
+///   selftest <serial>   one phone, start to stop
+///   selftest all        every phone, and check they parked flush
+///   selftest keep       every phone, left running
+///   selftest readopt    pick up phones left running, then close them
+fn test_opts(name: &str, keyboard: &str) -> Opts {
+    Opts {
+        audio: "off".into(),
+        keyboard: keyboard.into(),
+        max_size: 720,
+        max_fps: 30,
+        stay_awake: true,
+        screen_off: false,
+        show_touches: false,
+        view_only: false,
+        skin: false,
+        height: 700,
+        name: name.into(),
+    }
+}
+
+fn devices() -> Vec<(String, String, String)> {
+    let report = match probe() {
+        Ok(r) => r,
+        Err(e) => {
+            println!("probe failed: {}", e);
+            return Vec::new();
+        }
+    };
+    report["devices"]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .map(|d| {
+                    (
+                        d["serial"].as_str().unwrap_or("").to_string(),
+                        d["name"].as_str().unwrap_or("").to_string(),
+                        d["keyboard"].as_str().unwrap_or("paste").to_string(),
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn selftest(what: String) -> i32 {
+    let board = Board::default();
+
+    if what == "readopt" {
+        readopt(&board);
+        let found: Vec<(String, isize)> = board
+            .pedals
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|(s, p)| (s.clone(), p.hwnd))
+            .collect();
+        println!("readopted {} phone(s): {:?}", found.len(), found);
+        for (serial, _) in &found {
+            stop_inner(&board, serial);
+        }
+        println!("closed them again");
+        return if found.is_empty() { 1 } else { 0 };
+    }
+
+    if what == "all" || what == "keep" {
+        let list = devices();
+        if list.is_empty() {
+            println!("no phones");
+            return 1;
+        }
+        for (serial, name, keyboard) in &list {
+            match start_inner(&board, serial.clone(), test_opts(name, keyboard)) {
+                Ok(started) => println!("{} started, hwnd {}", name, started.hwnd),
+                Err(e) => {
+                    println!("{} FAILED: {}", name, e);
+                    return 1;
+                }
+            }
+        }
+        let rects: Vec<(String, win::Rect)> = board
+            .pedals
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|(s, p)| win::rect_of(p.hwnd).map(|r| (s.clone(), r)))
+            .collect();
+        for (serial, r) in &rects {
+            println!("{} at {},{} {}x{}", serial, r.left, r.top, r.w(), r.h());
+        }
+        if rects.len() > 1 {
+            let touching = adjacent(&rects[0].1, &rects[1].1);
+            println!("parked flush against each other: {}", touching);
+        }
+        if what == "keep" {
+            println!("left running");
+            std::mem::forget(board);
+            return 0;
+        }
+        for (serial, _) in &rects {
+            stop_inner(&board, serial);
+        }
+        println!("all closed");
+        return 0;
+    }
+
+    let serial = what;
+    let opts = test_opts("Self Test", "uhid");
+    match start_inner(&board, serial.clone(), opts) {
+        Ok(started) => println!("start ok, hwnd {}", started.hwnd),
+        Err(e) => {
+            println!("start FAILED: {}", e);
+            return 1;
+        }
+    }
+    let hwnd = board.pedals.lock().unwrap().get(&serial).map(|p| p.hwnd).unwrap_or(0);
+    println!("window alive: {}", win::is_window(hwnd));
+    println!("rect: {:?}", win::rect_of(hwnd));
+    println!("published: {}", std::fs::read_to_string(local_dir().join("windows.json"))
+        .unwrap_or_default().split_whitespace().collect::<Vec<_>>().join(" "));
+
+    std::thread::sleep(Duration::from_secs(3));
+    let survived = win::is_window(hwnd);
+    println!("still there after 3s: {}", survived);
+
+    stop_inner(&board, &serial);
+    std::thread::sleep(Duration::from_millis(400));
+    println!("gone after stop: {}", !win::is_window(hwnd));
+    if survived { 0 } else { 1 }
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() > 2 && args[1] == "selftest" {
+        std::process::exit(selftest(args[2].clone()));
+    }
+    tauri::Builder::default()
+        .manage(Board::default())
+        .setup(|app| {
+            *app.state::<Board>().magnet.lock().unwrap() = true;
+            readopt(&app.state::<Board>());
+            start_daemon();
+            let handle = app.handle().clone();
+            std::thread::spawn(move || magnet_loop(handle));
+            Ok(())
+        })
+        // deliberately no teardown on close: the phones are ordinary windows
+        // and outlive the strip that started them. adopt() picks them back up.
+        .invoke_handler(tauri::generate_handler![
+            probe, start, stop, running, set_skin, set_magnet, arrange,
+            focus_device, action, rotate, status, open_logs
+        ])
+        .run(tauri::generate_context!())
+        .expect("board failed to start");
+}

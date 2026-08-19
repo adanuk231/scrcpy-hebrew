@@ -1,0 +1,80 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>board</title>
+<link rel="stylesheet" href="style.css">
+
+<header class="bar">
+  <span class="mark"></span>
+  <h1>board</h1>
+  <button id="magnet" class="chip on" title="snap phone windows to each other">magnet</button>
+  <button id="ontop" class="chip" title="keep this strip above other windows">on top</button>
+  <button id="refresh" class="chip ghost" title="look for phones again">&#8635;</button>
+</header>
+
+<main id="rack"></main>
+
+<footer class="bar foot">
+  <button id="arrange" class="chip ghost">line them up</button>
+  <button id="logs" class="chip ghost">logs</button>
+  <span id="note"></span>
+</footer>
+
+<template id="pedal-template">
+  <article class="pedal">
+    <div class="grip" title="drag to reorder">
+      <span class="dots"></span>
+      <span class="name"></span>
+      <span class="badges"></span>
+      <button class="power" title="start or stop mirroring"></button>
+    </div>
+
+    <div class="knobs">
+      <div class="row">
+        <label>audio</label>
+        <div class="seg audio">
+          <button data-value="off">off</button>
+          <button data-value="output">to&nbsp;pc</button>
+          <button data-value="dup">shared</button>
+        </div>
+      </div>
+      <div class="row">
+        <label>size</label>
+        <div class="seg size">
+          <button data-value="0">native</button>
+          <button data-value="1080">1080</button>
+          <button data-value="720">720</button>
+        </div>
+      </div>
+      <div class="row">
+        <label>fps</label>
+        <div class="seg fps">
+          <button data-value="0">free</button>
+          <button data-value="60">60</button>
+          <button data-value="30">30</button>
+        </div>
+      </div>
+      <div class="row flags">
+        <button class="flag" data-flag="skin" title="frameless with rounded corners">skin</button>
+        <button class="flag" data-flag="stay_awake" title="keep the phone awake while mirrored">awake</button>
+        <button class="flag" data-flag="screen_off" title="turn the phone's own screen off">dark</button>
+        <button class="flag" data-flag="show_touches" title="show where the phone is being touched">touches</button>
+        <button class="flag" data-flag="view_only" title="mirror without control">look</button>
+      </div>
+    </div>
+
+    <div class="pads">
+      <button data-act="back">&#9666;</button>
+      <button data-act="home">&#9679;</button>
+      <button data-act="recents">&#9632;</button>
+      <span class="gap"></span>
+      <button data-act="volume_down">&#8722;</button>
+      <button data-act="volume_up">&#43;</button>
+      <button data-act="notifications">&#9776;</button>
+      <button data-act="power" class="warm">&#9211;</button>
+    </div>
+
+    <p class="why"></p>
+  </article>
+</template>
+
+<script src="app.js"></script>

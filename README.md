@@ -167,6 +167,14 @@ Passing your own `--window-title` still wins over all of it.
 * Logs: `%LOCALAPPDATA%\scrcpy-hebrew\daemon.log`. Set
   `SCRCPY_HEBREW_DEBUG=1` for per-keystroke detail.
 
+## The board
+
+Once there is more than one phone on the desk, `board/` is a small strip that
+sits beside them: what each phone can actually do, the options that need a
+reconnect, buttons that do not, and magnetism so two phone windows click
+together and move as one. It never takes the picture away from scrcpy - the
+phones stay ordinary windows. See [board/README.md](board/README.md).
+
 ## Verified on
 
 | Device | Android | Mode | Result |

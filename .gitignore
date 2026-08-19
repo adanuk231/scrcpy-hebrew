@@ -2,3 +2,5 @@ __pycache__/
 *.pyc
 *.log
 device-names.json
+board/src-tauri/target/
+board/src-tauri/gen/

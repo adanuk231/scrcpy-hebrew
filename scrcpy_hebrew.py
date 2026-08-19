@@ -162,6 +162,30 @@ SC_LCTRL, SC_LSHIFT, SC_SPACE, SC_V = 0x1D, 0x2A, 0x39, 0x2F
 LOCALE_SISO639LANGNAME = 0x0059
 
 
+class GUITHREADINFO(ctypes.Structure):
+    _fields_ = [("cbSize", wt.DWORD), ("flags", wt.DWORD),
+                ("hwndActive", wt.HWND), ("hwndFocus", wt.HWND),
+                ("hwndCapture", wt.HWND), ("hwndMenuOwner", wt.HWND),
+                ("hwndMoveSize", wt.HWND), ("hwndCaret", wt.HWND),
+                ("rcCaret", wt.RECT)]
+
+
+def focused_window():
+    """The window that actually has the keyboard, child windows included.
+
+    GetForegroundWindow() only ever answers with a top-level window, so once a
+    scrcpy window is reparented into a host (the board embeds them), it names
+    the host and every scrcpy check below fails. The focus of the foreground
+    thread is the real answer, and it is the same answer as before when scrcpy
+    is standing on its own.
+    """
+    info = GUITHREADINFO()
+    info.cbSize = ctypes.sizeof(info)
+    if user32.GetGUIThreadInfo(0, ctypes.byref(info)) and info.hwndFocus:
+        return info.hwndFocus
+    return user32.GetForegroundWindow()
+
+
 def held(vk):
     return bool(user32.GetAsyncKeyState(vk) & 0x8000)
 
@@ -284,6 +308,31 @@ def connected_devices():
     return devices
 
 
+WINDOWS_MAP = os.path.join(LOG_DIR, "windows.json")
+_WINMAP = {"at": None, "data": {}}
+
+
+def window_owners():
+    """hwnd -> serial, published by whatever is hosting the scrcpy windows.
+
+    Embedded, a window's title is the host's business and no longer says which
+    phone it is - so the host writes the mapping down instead of us guessing.
+    """
+    try:
+        stamp = os.stat(WINDOWS_MAP).st_mtime
+    except OSError:
+        return {}
+    if stamp != _WINMAP["at"]:
+        try:
+            with open(WINDOWS_MAP, encoding="utf-8") as fh:
+                _WINMAP["data"] = dict((int(k), v)
+                                       for k, v in json.load(fh).items())
+            _WINMAP["at"] = stamp
+        except Exception as exc:
+            dlog("windows.json: %r" % exc)
+    return _WINMAP["data"]
+
+
 NAMES_FILES = (
     os.path.join(LOG_DIR, "device-names.json"),
     os.path.join(os.path.dirname(os.path.abspath(__file__)), "device-names.json"),
@@ -373,6 +422,42 @@ def current_hardware_layout(serial):
     m = re.search(r"CurrentKeyboardLayout=(\S+)",
                   adb(serial, "shell", "dumpsys input"))
     return m.group(1) if m else None
+
+
+def sdk_level(serial):
+    try:
+        return int(adb(serial, "shell", "getprop", "ro.build.version.sdk") or 0)
+    except ValueError:
+        return 0
+
+
+def audio_support(sdk):
+    """What scrcpy can do with audio on this Android version.
+
+    'none'   - below 11, scrcpy has no audio at all
+    'output' - REMOTE_SUBMIX only, which takes the sound off the handset
+    'dup'    - 13+, so playback capture and --audio-dup keep the phone audible
+    """
+    if sdk >= 33:
+        return "dup"
+    if sdk >= 30:
+        return "output"
+    return "none"
+
+
+def capabilities(serial, tags=None, model=""):
+    sdk = sdk_level(serial)
+    layouts = hardware_layouts(serial)
+    return {
+        "serial": serial,
+        "name": device_name(serial, model),
+        "model": model,
+        "sdk": sdk,
+        "release": (adb(serial, "shell", "getprop", "ro.build.version.release") or "").strip(),
+        "keyboard": probe_mode(serial, tags),
+        "layouts": sorted(layouts),
+        "audio": audio_support(sdk),
+    }
 
 
 def probe_mode(serial, tags=None):
@@ -512,6 +597,9 @@ class Daemon:
             self.stop.wait(15)
 
     def serial_for(self, hwnd):
+        owner = window_owners().get(int(hwnd or 0))
+        if owner:
+            return owner
         title = window_title(hwnd)
         for serial in self.devices:
             if serial in title:
@@ -526,7 +614,7 @@ class Daemon:
 
     def foreground(self):
         """(hwnd, serial, mode, tag) - tag is '' for a Latin layout."""
-        hwnd = user32.GetForegroundWindow()
+        hwnd = focused_window()
         if not hwnd or exe_of_window(hwnd) not in TARGET_EXES:
             return None, None, "", ""
         tid = user32.GetWindowThreadProcessId(hwnd, None)
@@ -586,10 +674,10 @@ class Daemon:
     def _wait_for_focus(self, hwnd, timeout=1.5):
         deadline = time.time() + timeout
         while time.time() < deadline:
-            if user32.GetForegroundWindow() == hwnd and not modifiers_held():
+            if focused_window() == hwnd and not modifiers_held():
                 return True
             time.sleep(0.03)
-        return user32.GetForegroundWindow() == hwnd
+        return focused_window() == hwnd
 
     def _deliver(self, text):
         saved = get_clipboard_text()
@@ -629,7 +717,7 @@ class Daemon:
                     if attempt:
                         self.note((tag or "en").upper())
                     return
-                if user32.GetForegroundWindow() != hwnd or modifiers_held():
+                if focused_window() != hwnd or modifiers_held():
                     return                   # user moved on; do not stray
                 dlog("%s: toggling hardware language (want %s)" % (serial, want))
                 send_lang_toggle()
@@ -937,6 +1025,15 @@ def main():
         return run_daemon()
     if cmd == "launch":
         return run_launch(sys.argv[2:])
+    if cmd == "capabilities":
+        tags = installed_non_latin_tags()
+        devices = connected_devices()
+        print(json.dumps({
+            "host_layouts": sorted(tags),
+            "devices": [capabilities(serial, tags, model)
+                        for serial, model in devices.items()],
+        }, ensure_ascii=False))
+        return 0
     if cmd == "probe":
         tags = installed_non_latin_tags()
         print("non-Latin layouts installed on this PC: %s"
