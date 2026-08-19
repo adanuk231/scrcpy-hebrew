@@ -1,14 +1,19 @@
-/* The board: one card per phone, none of them holding a picture.
-   Everything that needs a restart says so; everything that does not is sent
-   straight to the phone over adb while it keeps mirroring. */
+/* One set of controls, and a row of phones along the bottom deciding which
+   phone they point at. Nothing here holds a picture: the phones are ordinary
+   scrcpy windows out on the desktop. */
 
 const invoke = window.__TAURI__.core.invoke;
 const listen = window.__TAURI__.event.listen;
 const appWindow = window.__TAURI__.window.getCurrentWindow();
+const LogicalSize = window.__TAURI__.window.LogicalSize;
 
-const rack = document.getElementById("rack");
-const note = document.getElementById("note");
-const tmpl = document.getElementById("pedal-template");
+const deck = document.getElementById("deck");
+const settings = document.getElementById("settings");
+const tabsEl = document.getElementById("tabs");
+const whyEl = document.getElementById("why");
+const powerEl = document.getElementById("power");
+const nameEl = deck.querySelector(".name");
+const badgesEl = deck.querySelector(".badges");
 
 const DEFAULTS = {
   audio: "off",
@@ -22,14 +27,16 @@ const DEFAULTS = {
   height: 760,
 };
 
-/** serial -> capability record from the python probe */
+/** serial -> what the phone can actually do, from the python probe */
 const caps = new Map();
 /** serial -> chosen options, remembered between runs */
 const opts = new Map();
-/** serials currently mirroring */
+/** serials mirroring right now */
 let live = new Set();
-/** the order the cards are in, which is also the order "line them up" uses */
+/** the order of the tabs, which is also the order "line them up" uses */
 let order = [];
+/** the phone every control on the deck points at */
+let selected = null;
 
 // ------------------------------------------------------------ settings ---
 
@@ -37,30 +44,28 @@ function load() {
   try {
     const raw = JSON.parse(localStorage.getItem("board") || "{}");
     order = raw.order || [];
+    selected = raw.selected || null;
     for (const [serial, value] of Object.entries(raw.opts || {})) {
       opts.set(serial, { ...DEFAULTS, ...value });
     }
+    return raw;
   } catch (_) {
-    /* first run */
+    return {};
   }
 }
 
 function save() {
   localStorage.setItem("board", JSON.stringify({
     order,
+    selected,
+    onTop: document.body.dataset.onTop === "1",
     opts: Object.fromEntries(opts),
   }));
 }
 
 function optionsFor(serial) {
   if (!opts.has(serial)) {
-    const cap = caps.get(serial) || {};
-    opts.set(serial, {
-      ...DEFAULTS,
-      // a phone that cannot forward audio should not pretend it is muted
-      audio: "off",
-      keyboard: cap.keyboard || "paste",
-    });
+    opts.set(serial, { ...DEFAULTS });
   }
   const value = opts.get(serial);
   const cap = caps.get(serial) || {};
@@ -69,100 +74,83 @@ function optionsFor(serial) {
   return value;
 }
 
-function say(text, warm) {
-  note.textContent = text || "";
-  note.style.color = warm ? "var(--warm)" : "var(--dim)";
+function say(text, tone) {
+  whyEl.textContent = text || "";
+  whyEl.classList.toggle("quiet", tone === "quiet");
+  fit();
 }
 
-// --------------------------------------------------------------- cards ---
-
-function audioReason(cap) {
-  if (cap.audio === "none") {
-    return `Android ${cap.release} cannot forward audio at all - scrcpy needs 11 or newer.`;
+/** Hold a message on screen for a moment instead of letting a repaint eat it. */
+function hold(text, tone, ms) {
+  say(text, tone);
+  whyEl.dataset.sticky = "1";
+  if (ms) {
+    setTimeout(() => {
+      delete whyEl.dataset.sticky;
+      paint();
+    }, ms);
   }
-  if (cap.audio === "output") {
-    return `Android ${cap.release} only has the submix route, so sending audio here takes it off the handset.`;
+}
+
+// ---------------------------------------------------------- what it can --
+
+/** Why an option is not available on this phone, or "" if it is. */
+function blocked(cap, key, value) {
+  if (key !== "audio") return "";
+  if (value === "output" && cap.audio === "none") {
+    return `${cap.name} runs Android ${cap.release}. scrcpy forwards audio from 11 up, so there is nothing to send.`;
+  }
+  if (value === "dup") {
+    if (cap.audio === "none") {
+      return `${cap.name} runs Android ${cap.release}, which has no audio forwarding at all.`;
+    }
+    if (cap.audio !== "dup") {
+      return `Sharing needs Android 13 for playback capture. On ${cap.release} the only route is "to pc", and that takes the sound off the handset.`;
+    }
   }
   return "";
 }
 
-function render() {
-  const seen = new Set();
-  for (const serial of order) {
-    if (caps.has(serial)) {
-      seen.add(serial);
-      card(serial);
-    }
+/** Something worth knowing about this phone even when nothing is blocked. */
+function footnote(cap, o) {
+  if (o.audio === "output" && cap.audio === "output") {
+    return `Audio arrives here through REMOTE_SUBMIX, so ${cap.name} itself goes quiet while it plays.`;
   }
-  for (const serial of caps.keys()) {
-    if (!seen.has(serial)) {
-      order.push(serial);
-      card(serial);
-    }
+  if (o.view_only) {
+    return "Look only: the mirror passes no clicks or typing. The buttons below still work.";
   }
-  for (const node of [...rack.children]) {
-    if (!caps.has(node.dataset.serial)) {
-      node.remove();
-    }
+  if (cap.keyboard === "paste") {
+    return `${cap.name} has no hardware keyboard layout, so Hebrew goes through the clipboard rather than uhid.`;
   }
-  // only touch the DOM when the order really differs - moving nodes on every
-  // poll makes the cards flicker and throws away accessibility handles
-  const now = [...rack.children].map((node) => node.dataset.serial);
-  const want = order.filter((serial) => caps.has(serial));
-  if (now.join() !== want.join()) {
-    for (const serial of want) {
-      const node = rack.querySelector(`[data-serial="${serial}"]`);
-      if (node) rack.appendChild(node);
-    }
-  }
-  save();
+  return "";
 }
 
-function card(serial) {
-  let node = rack.querySelector(`[data-serial="${serial}"]`);
-  if (!node) {
-    node = tmpl.content.firstElementChild.cloneNode(true);
-    node.dataset.serial = serial;
-    rack.appendChild(node);
-    wire(node, serial);
-  }
-  paint(node, serial);
-  return node;
-}
+// ---------------------------------------------------------------- deck ---
 
-function paint(node, serial) {
-  const cap = caps.get(serial);
-  const o = optionsFor(serial);
-  const on = live.has(serial);
+function paint() {
+  const cap = caps.get(selected);
+  const running = live.has(selected);
+  document.body.classList.toggle("live", running);
 
-  const name = cap.name || serial;
-  node.classList.toggle("live", on);
-  node.querySelector(".name").textContent = name;
-  // named for screen readers, which also makes every control addressable
-  node.setAttribute("aria-label", name);
-  const power = node.querySelector(".power");
-  power.setAttribute("aria-label", `${on ? "stop" : "start"} ${name}`);
-  for (const pad of node.querySelectorAll(".pads button")) {
-    pad.setAttribute("aria-label", `${pad.dataset.act} ${name}`);
-  }
-  for (const seg of node.querySelectorAll(".seg")) {
-    const what = seg.classList.contains("audio") ? "audio"
-      : seg.classList.contains("size") ? "size" : "fps";
-    for (const button of seg.querySelectorAll("button")) {
-      button.setAttribute("aria-label", `${what} ${button.textContent.trim()} ${name}`);
-    }
-  }
-  for (const flag of node.querySelectorAll(".flag")) {
-    flag.setAttribute("aria-label", `${flag.dataset.flag} ${name}`);
+  if (!cap) {
+    nameEl.textContent = caps.size ? "pick a phone" : "no phones on adb";
+    badgesEl.innerHTML = "";
+    powerEl.disabled = true;
+    if (!whyEl.dataset.sticky) say("");
+    paintTabs();
+    return;
   }
 
-  const badges = node.querySelector(".badges");
-  badges.innerHTML = "";
+  powerEl.disabled = false;
+  nameEl.textContent = cap.name;
+  powerEl.setAttribute("aria-label", `${running ? "stop" : "start"} ${cap.name}`);
+
+  badgesEl.innerHTML = "";
   const add = (text, cls) => {
     const b = document.createElement("b");
     b.textContent = text;
     if (cls) b.className = cls;
-    badges.appendChild(b);
+    badgesEl.appendChild(b);
   };
   add(`A${cap.release}`);
   add(cap.keyboard, cap.keyboard === "uhid" ? "uhid" : "");
@@ -170,168 +158,266 @@ function paint(node, serial) {
     add(`${cap.battery}%`, cap.battery <= 20 ? "low" : "");
   }
 
-  for (const seg of node.querySelectorAll(".seg")) {
-    const key = seg.classList.contains("audio") ? "audio"
-      : seg.classList.contains("size") ? "max_size" : "max_fps";
+  const o = optionsFor(selected);
+  for (const seg of deck.querySelectorAll(".seg")) {
+    const key = seg.dataset.key;
     for (const button of seg.querySelectorAll("button")) {
       const value = key === "audio" ? button.dataset.value : Number(button.dataset.value);
       button.classList.toggle("on", o[key] === value);
-      if (key === "audio") {
-        button.disabled =
-          (button.dataset.value === "output" && cap.audio === "none") ||
-          (button.dataset.value === "dup" && cap.audio !== "dup");
-      }
+      button.classList.toggle("blocked", !!blocked(cap, key, button.dataset.value));
+      button.setAttribute("aria-label", `${key} ${button.textContent.trim()} ${cap.name}`);
     }
   }
-
-  for (const flag of node.querySelectorAll(".flag")) {
+  for (const flag of deck.querySelectorAll(".flag")) {
     flag.classList.toggle("on", !!o[flag.dataset.flag]);
+    flag.setAttribute("aria-label", `${flag.dataset.flag} ${cap.name}`);
+  }
+  for (const pad of deck.querySelectorAll(".pads button")) {
+    pad.setAttribute("aria-label", `${pad.dataset.act} ${cap.name}`);
   }
 
-  node.querySelector(".why").textContent = o.audio !== "off" || cap.audio === "none"
-    ? audioReason(cap)
-    : "";
+  if (!whyEl.dataset.sticky) say(footnote(cap, o), "quiet");
+  paintTabs();
+  fit();
 }
 
-// -------------------------------------------------------------- wiring ---
-
-function wire(node, serial) {
-  node.querySelector(".power").addEventListener("click", (e) => {
-    e.stopPropagation();
-    live.has(serial) ? stop(serial) : start(serial);
-  });
-
-  for (const seg of node.querySelectorAll(".seg")) {
-    const key = seg.classList.contains("audio") ? "audio"
-      : seg.classList.contains("size") ? "max_size" : "max_fps";
-    seg.addEventListener("click", (e) => {
-      const button = e.target.closest("button");
-      if (!button || button.disabled) return;
-      const o = optionsFor(serial);
-      o[key] = key === "audio" ? button.dataset.value : Number(button.dataset.value);
-      save();
-      paint(node, serial);
-      restartIfLive(serial, key);
-    });
+function paintTabs() {
+  const want = order.filter((s) => caps.has(s));
+  const have = [...tabsEl.children].map((n) => n.dataset.serial);
+  if (want.join() !== have.join()) {
+    tabsEl.innerHTML = "";
+    for (const serial of want) {
+      const tab = document.createElement("button");
+      tab.className = "tab";
+      tab.dataset.serial = serial;
+      tab.innerHTML = '<span class="dot"></span>';
+      tab.append(caps.get(serial).name);
+      tabsEl.appendChild(tab);
+    }
   }
-
-  for (const flag of node.querySelectorAll(".flag")) {
-    flag.addEventListener("click", () => {
-      const o = optionsFor(serial);
-      const key = flag.dataset.flag;
-      o[key] = !o[key];
-      save();
-      paint(node, serial);
-      if (key === "skin" && live.has(serial)) {
-        // the only toggle that can be applied to a running window
-        invoke("set_skin", { serial, on: o.skin }).catch((err) => say(String(err), true));
-        return;
-      }
-      restartIfLive(serial, key);
-    });
+  for (const tab of tabsEl.children) {
+    const serial = tab.dataset.serial;
+    tab.classList.toggle("on", serial === selected);
+    tab.classList.toggle("running", live.has(serial));
+    tab.setAttribute("aria-label", `select ${caps.get(serial).name}`);
   }
-
-  node.querySelector(".pads").addEventListener("click", (e) => {
-    const button = e.target.closest("button");
-    if (!button) return;
-    invoke("action", { serial, what: button.dataset.act })
-      .then(() => say(`${button.dataset.act} sent`))
-      .catch((err) => say(String(err), true));
-  });
-
-  node.querySelector(".grip").addEventListener("pointerdown", (e) => {
-    if (e.target.closest(".power")) return;
-    drag(node, e);
-  });
-
-  node.addEventListener("dblclick", () => {
-    if (live.has(serial)) invoke("focus_device", { serial });
-  });
 }
 
-async function restartIfLive(serial, key) {
-  if (!live.has(serial)) return;
-  say(`${key} needs a reconnect...`);
-  await start(serial);
+function select(serial) {
+  selected = serial;
+  delete whyEl.dataset.sticky;
+  showPage("deck");
+  paint();
+  save();
 }
+
+/* A panel should be exactly as tall as what is in it, so the window follows
+   the content rather than leaving half of itself empty. */
+let fitted = 0;
+let fitting = null;
+
+function fit() {
+  clearTimeout(fitting);
+  fitting = setTimeout(async () => {
+    const header = document.querySelector("header.bar");
+    const tabs = document.querySelector("nav.tabs");
+    const page = settings.hidden ? deck : settings;
+    const wanted = Math.max(300, Math.min(880, Math.ceil(
+      header.offsetHeight + page.scrollHeight + tabs.offsetHeight + 2)));
+    if (Math.abs(wanted - fitted) < 3) return;
+    fitted = wanted;
+    try {
+      await appWindow.setSize(new LogicalSize(396, wanted));
+      await invoke("settled");
+    } catch (_) {
+      /* the window may be on its way out */
+    }
+  }, 40);
+}
+
+function showPage(page) {
+  deck.hidden = page !== "deck";
+  settings.hidden = page !== "settings";
+  document.getElementById("gear").classList.toggle("on", page === "settings");
+  fit();
+}
+
+// ------------------------------------------------------------- actions ---
 
 async function start(serial) {
-  const node = card(serial);
-  node.classList.add("busy");
-  say("connecting...");
+  hold("connecting...", "quiet");
   try {
     await invoke("start", { serial, opts: optionsFor(serial) });
     live.add(serial);
-    say("");
+    delete whyEl.dataset.sticky;
   } catch (err) {
     live.delete(serial);
-    say(String(err), true);
-  } finally {
-    node.classList.remove("busy");
-    paint(node, serial);
+    hold(String(err));
   }
+  paint();
 }
 
 async function stop(serial) {
   await invoke("stop", { serial });
   live.delete(serial);
-  paint(card(serial), serial);
-  say("");
+  delete whyEl.dataset.sticky;
+  paint();
 }
 
-// ------------------------------------------------------- dragging cards --
+async function reconnect(serial, what) {
+  if (!live.has(serial)) return;
+  hold(`${what} needs a reconnect...`, "quiet");
+  await start(serial);
+}
 
-function drag(node, event) {
-  const cards = [...rack.children];
-  if (cards.length < 2) return;
-  const startY = event.clientY;
-  const home = node.getBoundingClientRect();
-  node.classList.add("lifted");
-  node.setPointerCapture(event.pointerId);
+powerEl.addEventListener("click", () => {
+  if (!selected) return;
+  live.has(selected) ? stop(selected) : start(selected);
+});
 
-  const step = home.height + 10;
-
-  const move = (e) => {
-    const dy = e.clientY - startY;
-    node.style.transform = `translateY(${dy}px) scale(1.02)`;
-    const from = cards.indexOf(node);
-    const to = Math.max(0, Math.min(cards.length - 1, from + Math.round(dy / step)));
-    for (const [i, other] of cards.entries()) {
-      if (other === node) continue;
-      let shift = 0;
-      if (from < to && i > from && i <= to) shift = -step;
-      if (from > to && i < from && i >= to) shift = step;
-      other.style.transform = shift ? `translateY(${shift}px)` : "";
+for (const seg of deck.querySelectorAll(".seg")) {
+  seg.addEventListener("click", (e) => {
+    const button = e.target.closest("button");
+    if (!button || !selected) return;
+    const key = seg.dataset.key;
+    const no = blocked(caps.get(selected), key, button.dataset.value);
+    if (no) {
+      // not a failure, just not something this phone can do
+      hold(no, "", 6000);
+      return;
     }
+    const o = optionsFor(selected);
+    o[key] = key === "audio" ? button.dataset.value : Number(button.dataset.value);
+    delete whyEl.dataset.sticky;
+    save();
+    paint();
+    reconnect(selected, key);
+  });
+}
+
+for (const flag of deck.querySelectorAll(".flag")) {
+  flag.addEventListener("click", () => {
+    if (!selected) return;
+    const o = optionsFor(selected);
+    const key = flag.dataset.flag;
+    o[key] = !o[key];
+    delete whyEl.dataset.sticky;
+    save();
+    paint();
+    if (key === "skin" && live.has(selected)) {
+      // the one thing that can be changed on a window already open
+      invoke("set_skin", { serial: selected, on: o.skin }).catch((err) => hold(String(err)));
+      return;
+    }
+    reconnect(selected, key);
+  });
+}
+
+deck.querySelector(".pads").addEventListener("click", (e) => {
+  const button = e.target.closest("button");
+  if (!button || !selected) return;
+  const name = caps.get(selected).name;
+  invoke("action", { serial: selected, what: button.dataset.act })
+    .then(() => hold(`${button.dataset.act} sent to ${name}`, "quiet", 1600))
+    .catch((err) => hold(String(err), "", 5000));
+});
+
+// ------------------------------------------------------ tabs and header --
+
+tabsEl.addEventListener("click", (e) => {
+  const tab = e.target.closest(".tab");
+  if (tab && !tab.dataset.dragged) select(tab.dataset.serial);
+});
+
+/** Drag a tab sideways to reorder; the phones follow when they are lined up. */
+tabsEl.addEventListener("pointerdown", (e) => {
+  const tab = e.target.closest(".tab");
+  if (!tab || tabsEl.children.length < 2) return;
+  const tabs = [...tabsEl.children];
+  const startX = e.clientX;
+  const step = tab.getBoundingClientRect().width + 6;
+  let moved = false;
+  tab.setPointerCapture(e.pointerId);
+
+  const move = (ev) => {
+    const dx = ev.clientX - startX;
+    if (Math.abs(dx) > 4) moved = true;
+    if (!moved) return;
+    tab.classList.add("lifted");
+    tab.style.transform = `translateX(${dx}px) scale(1.06)`;
   };
 
-  const drop = (e) => {
-    node.releasePointerCapture(event.pointerId);
-    node.removeEventListener("pointermove", move);
-    node.removeEventListener("pointerup", drop);
-    const dy = e.clientY - startY;
-    const from = cards.indexOf(node);
-    const to = Math.max(0, Math.min(cards.length - 1, from + Math.round(dy / step)));
-    for (const other of cards) other.style.transform = "";
-    node.classList.remove("lifted");
+  const drop = (ev) => {
+    tab.releasePointerCapture(e.pointerId);
+    tabsEl.removeEventListener("pointermove", move);
+    tabsEl.removeEventListener("pointerup", drop);
+    tab.classList.remove("lifted");
+    tab.style.transform = "";
+    if (!moved) return;
+    const from = tabs.indexOf(tab);
+    const to = Math.max(0, Math.min(tabs.length - 1,
+      from + Math.round((ev.clientX - startX) / step)));
     if (to !== from) {
-      order = cards.map((c) => c.dataset.serial);
+      order = tabs.map((t) => t.dataset.serial);
       order.splice(to, 0, order.splice(from, 1)[0]);
-      render();
-      arrange();
+      save();
+      paintTabs();
+      lineThemUp();
     }
+    tab.dataset.dragged = "1";
+    setTimeout(() => delete tab.dataset.dragged, 0);
   };
 
-  node.addEventListener("pointermove", move);
-  node.addEventListener("pointerup", drop);
+  tabsEl.addEventListener("pointermove", move);
+  tabsEl.addEventListener("pointerup", drop);
+});
+
+function lineThemUp() {
+  const running = order.filter((s) => live.has(s));
+  if (running.length) invoke("arrange", { order: running });
 }
 
-function arrange() {
-  const running = order.filter((serial) => live.has(serial));
-  if (running.length) {
-    invoke("arrange", { order: running });
+document.getElementById("arrange").addEventListener("click", lineThemUp);
+document.getElementById("close").addEventListener("click", () => invoke("hide_board"));
+document.getElementById("gear").addEventListener("click", () => {
+  showPage(settings.hidden ? "settings" : "deck");
+});
+document.getElementById("logs").addEventListener("click", () => invoke("open_logs"));
+
+const loginBox = document.getElementById("login");
+loginBox.addEventListener("change", async () => {
+  try {
+    loginBox.checked = await invoke("set_autostart", { on: loginBox.checked });
+  } catch (err) {
+    loginBox.checked = false;
+    hold(String(err));
   }
-}
+});
+
+const ontopBox = document.getElementById("ontop");
+ontopBox.addEventListener("change", async () => {
+  document.body.dataset.onTop = ontopBox.checked ? "1" : "0";
+  await appWindow.setAlwaysOnTop(ontopBox.checked);
+  save();
+});
+
+/* Keys, because a panel that lives in the tray is often the only thing on
+   screen: Escape puts it away, comma opens the settings behind the gear, and
+   the number keys pick a phone. */
+window.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") {
+    invoke("hide_board");
+    return;
+  }
+  if (e.key === "," || (e.ctrlKey && e.key === ",")) {
+    showPage(settings.hidden ? "settings" : "deck");
+    return;
+  }
+  const n = Number(e.key);
+  if (n >= 1 && n <= 9 && order[n - 1]) {
+    select(order[n - 1]);
+  }
+});
 
 // ---------------------------------------------------------------- boot ---
 
@@ -339,75 +425,52 @@ async function refresh() {
   try {
     const report = await invoke("probe");
     caps.clear();
-    for (const device of report.devices) {
-      caps.set(device.serial, device);
+    for (const device of report.devices) caps.set(device.serial, device);
+    for (const serial of caps.keys()) {
+      if (!order.includes(serial)) order.push(serial);
     }
+    order = order.filter((s) => caps.has(s));
     live = new Set(await invoke("running"));
-    render();
-    say(report.devices.length ? "" : "no phones on adb");
+    if (!caps.has(selected)) selected = order[0] || null;
+    paint();
+    save();
+
     for (const serial of caps.keys()) {
       invoke("status", { serial })
         .then((s) => {
           const cap = caps.get(serial);
           if (cap) {
             cap.battery = s.battery;
-            const node = rack.querySelector(`[data-serial="${serial}"]`);
-            if (node) paint(node, serial);
+            if (serial === selected) paint();
           }
         })
         .catch(() => {});
     }
   } catch (err) {
-    say(String(err), true);
+    hold(String(err));
   }
 }
 
 document.getElementById("refresh").addEventListener("click", refresh);
 
-document.getElementById("magnet").addEventListener("click", (e) => {
-  const on = !e.target.classList.contains("on");
-  e.target.classList.toggle("on", on);
-  invoke("set_magnet", { on });
-  say(on ? "windows snap to each other" : "magnet off");
-});
-
-document.getElementById("ontop").addEventListener("click", async (e) => {
-  const on = !e.target.classList.contains("on");
-  e.target.classList.toggle("on", on);
-  await appWindow.setAlwaysOnTop(on);
-});
-
-document.getElementById("hide").addEventListener("click", () => invoke("hide_board"));
-
-const loginChip = document.getElementById("login");
-loginChip.addEventListener("click", async () => {
-  try {
-    const on = await invoke("set_autostart", { on: !loginChip.classList.contains("on") });
-    loginChip.classList.toggle("on", on);
-    say(on ? "starts with Windows, hidden in the tray" : "no longer starts with Windows");
-  } catch (err) {
-    say(String(err), true);
-  }
-});
-invoke("autostart_state").then((on) => loginChip.classList.toggle("on", on));
-
-// the tray can flip either of these behind the UI's back
-listen("autostart-changed", (e) => loginChip.classList.toggle("on", !!e.payload));
-listen("magnet-changed", (e) => {
-  document.getElementById("magnet").classList.toggle("on", !!e.payload);
-});
-
-document.getElementById("arrange").addEventListener("click", arrange);
-document.getElementById("logs").addEventListener("click", () => invoke("open_logs"));
-
 listen("pedals-changed", (event) => {
-  for (const serial of event.payload || []) {
-    live.delete(serial);
-    const node = rack.querySelector(`[data-serial="${serial}"]`);
-    if (node) paint(node, serial);
-  }
+  for (const serial of event.payload || []) live.delete(serial);
+  paint();
 });
 
-load();
+listen("flicked-out", (event) => {
+  const cap = caps.get(event.payload);
+  if (cap) hold(`${cap.name} thrown clear of its group`, "quiet", 1800);
+});
+
+listen("autostart-changed", (e) => { loginBox.checked = !!e.payload; });
+
+const saved = load();
+showPage("deck");
+invoke("autostart_state").then((on) => { loginBox.checked = on; });
+const onTop = saved.onTop !== false;
+ontopBox.checked = onTop;
+document.body.dataset.onTop = onTop ? "1" : "0";
+appWindow.setAlwaysOnTop(onTop);
 refresh();
 setInterval(refresh, 20000);

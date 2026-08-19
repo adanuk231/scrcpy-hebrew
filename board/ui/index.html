@@ -3,37 +3,42 @@
 <title>board</title>
 <link rel="stylesheet" href="style.css">
 
-<header class="bar">
-  <span class="mark"></span>
-  <h1>board</h1>
-  <button id="magnet" class="chip on" title="snap phone windows to each other">magnet</button>
-  <button id="ontop" class="chip" title="keep this strip above other windows">on top</button>
-  <button id="refresh" class="chip ghost" title="look for phones again">&#8635;</button>
-  <button id="hide" class="chip ghost" title="put the board in the tray - phones keep running">&#8211;</button>
+<header class="bar" data-tauri-drag-region>
+  <span class="mark" data-tauri-drag-region></span>
+  <span class="wordmark" data-tauri-drag-region>board</span>
+
+  <button class="ico" id="arrange" title="line them up">
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      <rect x="1.5" y="3" width="4" height="10" rx="1"/>
+      <rect x="6.5" y="3" width="4" height="10" rx="1"/>
+      <rect x="11.5" y="3" width="3" height="10" rx="1"/>
+    </svg>
+  </button>
+  <button class="ico" id="refresh" title="look for phones again">
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M13 8a5 5 0 1 1-1.6-3.7" fill="none" stroke-width="1.6"/>
+      <path d="M13.4 2.6v3.2h-3.2" fill="none" stroke-width="1.6"/>
+    </svg>
+  </button>
+  <button class="ico" id="close" title="put the board back in the tray">
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M4 4l8 8M12 4l-8 8" fill="none" stroke-width="1.7"/>
+    </svg>
+  </button>
 </header>
 
-<main id="rack"></main>
-
-<footer class="bar foot">
-  <button id="arrange" class="chip ghost">line them up</button>
-  <button id="login" class="chip ghost" title="start with Windows, straight into the tray">at login</button>
-  <button id="logs" class="chip ghost">logs</button>
-  <span id="note"></span>
-</footer>
-
-<template id="pedal-template">
-  <article class="pedal">
-    <div class="grip" title="drag to reorder">
-      <span class="dots"></span>
-      <span class="name"></span>
+<main>
+  <section id="deck">
+    <div class="who">
+      <span class="name">looking for phones</span>
       <span class="badges"></span>
-      <button class="power" title="start or stop mirroring"></button>
+      <button class="power" id="power" title="start or stop mirroring"></button>
     </div>
 
     <div class="knobs">
       <div class="row">
         <label>audio</label>
-        <div class="seg audio">
+        <div class="seg" data-key="audio">
           <button data-value="off">off</button>
           <button data-value="output">to&nbsp;pc</button>
           <button data-value="dup">shared</button>
@@ -41,7 +46,7 @@
       </div>
       <div class="row">
         <label>size</label>
-        <div class="seg size">
+        <div class="seg" data-key="max_size">
           <button data-value="0">native</button>
           <button data-value="1080">1080</button>
           <button data-value="720">720</button>
@@ -49,34 +54,64 @@
       </div>
       <div class="row">
         <label>fps</label>
-        <div class="seg fps">
+        <div class="seg" data-key="max_fps">
           <button data-value="0">free</button>
           <button data-value="60">60</button>
           <button data-value="30">30</button>
         </div>
       </div>
       <div class="row flags">
-        <button class="flag" data-flag="skin" title="frameless with rounded corners">skin</button>
-        <button class="flag" data-flag="stay_awake" title="keep the phone awake while mirrored">awake</button>
+        <button class="flag" data-flag="skin" title="frameless, rounded corners">skin</button>
+        <button class="flag" data-flag="stay_awake" title="keep the phone awake">awake</button>
         <button class="flag" data-flag="screen_off" title="turn the phone's own screen off">dark</button>
-        <button class="flag" data-flag="show_touches" title="show where the phone is being touched">touches</button>
+        <button class="flag" data-flag="show_touches" title="show where it is touched">touches</button>
         <button class="flag" data-flag="view_only" title="mirror without control">look</button>
       </div>
     </div>
 
     <div class="pads">
-      <button data-act="back">&#9666;</button>
-      <button data-act="home">&#9679;</button>
-      <button data-act="recents">&#9632;</button>
+      <button data-act="back" title="back">&#9666;</button>
+      <button data-act="home" title="home">&#9679;</button>
+      <button data-act="recents" title="recents">&#9632;</button>
       <span class="gap"></span>
-      <button data-act="volume_down">&#8722;</button>
-      <button data-act="volume_up">&#43;</button>
-      <button data-act="notifications">&#9776;</button>
-      <button data-act="power" class="warm">&#9211;</button>
+      <button data-act="volume_down" title="volume down">&#8722;</button>
+      <button data-act="volume_up" title="volume up">&#43;</button>
+      <button data-act="notifications" title="notifications">&#9776;</button>
+      <button data-act="power" class="warm" title="screen on or off">&#9211;</button>
     </div>
 
-    <p class="why"></p>
-  </article>
-</template>
+    <p class="why" id="why"></p>
+  </section>
+
+  <section id="settings" hidden>
+    <h2>settings</h2>
+    <label class="switch">
+      <input type="checkbox" id="login">
+      <span>start with Windows</span>
+      <small>signs in straight to the tray, no window in the way</small>
+    </label>
+    <label class="switch">
+      <input type="checkbox" id="ontop">
+      <span>keep the board on top</span>
+      <small>otherwise it sits behind whatever you click next</small>
+    </label>
+    <div class="note">
+      Phones snap to each other and never overlap. Drag one and whatever is
+      stuck to it comes along; throw one and it leaves the group.
+    </div>
+    <button class="wide" id="logs">open the logs folder</button>
+  </section>
+</main>
+
+<nav class="tabs">
+  <div class="strip" id="tabs"></div>
+  <button class="ico gear" id="gear" title="settings">
+    <svg viewBox="0 0 16 16" aria-hidden="true">
+      <path d="M2 4.5h7.2M13.6 4.5h.9M2 11.5h3.2M9.6 11.5h4.9" fill="none" stroke-width="1.6"/>
+      <circle cx="11.4" cy="4.5" r="1.9" fill="none" stroke-width="1.6"/>
+      <circle cx="7.4" cy="11.5" r="1.9" fill="none" stroke-width="1.6"/>
+    </svg>
+  </button>
+</nav>
 
 <script src="app.js"></script>

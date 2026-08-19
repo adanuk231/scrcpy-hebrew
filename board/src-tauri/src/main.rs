@@ -9,11 +9,12 @@
 //! actually do, buttons that do not need a restart, and magnetism between the
 //! windows so two phones can be handled as one slab.
 
+mod magnet;
 mod startup;
 mod win;
 
 use serde::{Deserialize, Serialize};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::io::Write;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -21,17 +22,12 @@ use std::process::{Child, Command, Stdio};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
+use raw_window_handle::{HasWindowHandle, RawWindowHandle};
 use tauri::{Emitter, Manager, State};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 const DETACHED: u32 = 0x0000_0008;
 
-/// how close two edges have to be before they click together
-const SNAP: i32 = 26;
-/// how close counts as already stuck together
-const TOUCHING: i32 = 6;
-/// how far a window will travel to line up with one it has just joined
-const ALIGN: i32 = 90;
 
 // ---------------------------------------------------------------- state ----
 
@@ -39,13 +35,11 @@ struct Pedal {
     child: Option<Child>,
     hwnd: isize,
     skin: bool,
-    last: win::Rect,
 }
 
 #[derive(Default)]
 struct Board {
     pedals: Mutex<HashMap<String, Pedal>>,
-    magnet: Mutex<bool>,
 }
 
 // ------------------------------------------------------------- plumbing ----
@@ -149,204 +143,6 @@ fn publish_windows(pedals: &HashMap<String, Pedal>) {
     }
 }
 
-// --------------------------------------------------------------- magnet ----
-
-fn overlaps(a1: i32, a2: i32, b1: i32, b2: i32) -> bool {
-    a1.min(a2) < b1.max(b2) && b1.min(b2) < a1.max(a2)
-}
-
-/// Are these two windows stuck to each other right now?
-fn adjacent(a: &win::Rect, b: &win::Rect) -> bool {
-    let vertical = overlaps(a.top, a.bottom, b.top, b.bottom)
-        && ((a.right - b.left).abs() <= TOUCHING || (b.right - a.left).abs() <= TOUCHING);
-    let horizontal = overlaps(a.left, a.right, b.left, b.right)
-        && ((a.bottom - b.top).abs() <= TOUCHING || (b.bottom - a.top).abs() <= TOUCHING);
-    vertical || horizontal
-}
-
-/// Everything stuck to `seed`, directly or through another phone.
-fn cluster(seed: &str, rects: &HashMap<String, win::Rect>) -> HashSet<String> {
-    let mut group: HashSet<String> = HashSet::new();
-    group.insert(seed.to_string());
-    loop {
-        let mut grew = false;
-        for (serial, rect) in rects {
-            if group.contains(serial) {
-                continue;
-            }
-            if group.iter().any(|m| rects.get(m).map_or(false, |r| adjacent(r, rect))) {
-                group.insert(serial.clone());
-                grew = true;
-            }
-        }
-        if !grew {
-            return group;
-        }
-    }
-}
-
-/// The offset that would click `moving` onto one of `others` or onto the edge
-/// of the screen, if anything is close enough.
-fn snap_offset(moving: &win::Rect, others: &[win::Rect], area: &win::Rect) -> (i32, i32) {
-    // two kinds of candidate: a join, where an edge meets an edge, and an
-    // alignment, where two windows merely line up. Joins win, and once one
-    // has happened the alignment on the other axis is allowed a longer reach -
-    // phones put shoulder to shoulder should end up flush, not stepped.
-    let mut xs: Vec<(i32, bool)> = Vec::new();
-    let mut ys: Vec<(i32, bool)> = Vec::new();
-
-    for o in others {
-        if overlaps(moving.top, moving.bottom, o.top, o.bottom) {
-            xs.push((o.left - moving.right, true));
-            xs.push((o.right - moving.left, true));
-            ys.push((o.top - moving.top, false));
-            ys.push((o.bottom - moving.bottom, false));
-        }
-        if overlaps(moving.left, moving.right, o.left, o.right) {
-            ys.push((o.top - moving.bottom, true));
-            ys.push((o.bottom - moving.top, true));
-            xs.push((o.left - moving.left, false));
-            xs.push((o.right - moving.right, false));
-        }
-    }
-    xs.push((area.left - moving.left, false));
-    xs.push((area.right - moving.right, false));
-    ys.push((area.top - moving.top, false));
-    ys.push((area.bottom - moving.bottom, false));
-
-    let (dx, joined_x) = choose(&xs, SNAP, SNAP);
-    let (dy, joined_y) = choose(&ys, SNAP, if joined_x { ALIGN } else { SNAP });
-    if joined_y && !joined_x {
-        let (dx, _) = choose(&xs, SNAP, ALIGN);
-        return (dx, dy);
-    }
-    (dx, dy)
-}
-
-fn choose(candidates: &[(i32, bool)], join_limit: i32, align_limit: i32) -> (i32, bool) {
-    let mut best: Option<(i32, bool)> = None;
-    for (gap, is_join) in candidates {
-        let limit = if *is_join { join_limit } else { align_limit };
-        if gap.abs() > limit {
-            continue;
-        }
-        let better = match best {
-            None => true,
-            Some((chosen, chosen_join)) => {
-                (*is_join && !chosen_join)
-                    || (*is_join == chosen_join && gap.abs() < chosen.abs())
-            }
-        };
-        if better {
-            best = Some((*gap, *is_join));
-        }
-    }
-    best.unwrap_or((0, false))
-}
-
-/// Watches the phone windows. While one is being dragged its neighbours come
-/// along; when it is dropped it clicks onto whatever it was near.
-fn magnet_loop(app: tauri::AppHandle) {
-    let mut dragging: Option<String> = None;
-    let mut travelling: HashSet<String> = HashSet::new();
-
-    loop {
-        std::thread::sleep(Duration::from_millis(40));
-        let board = app.state::<Board>();
-        let on = *board.magnet.lock().unwrap();
-        let mut pedals = board.pedals.lock().unwrap();
-
-        // current geometry, dropping anything that has gone away
-        let mut rects: HashMap<String, win::Rect> = HashMap::new();
-        let mut lost: Vec<String> = Vec::new();
-        for (serial, pedal) in pedals.iter() {
-            match win::rect_of(pedal.hwnd) {
-                Some(r) if win::is_window(pedal.hwnd) && !win::is_minimised(pedal.hwnd) => {
-                    rects.insert(serial.clone(), r);
-                }
-                _ => {
-                    if !win::is_window(pedal.hwnd) {
-                        lost.push(serial.clone());
-                    }
-                }
-            }
-        }
-        if !lost.is_empty() {
-            for serial in &lost {
-                pedals.remove(serial);
-            }
-            publish_windows(&pedals);
-            let _ = app.emit("pedals-changed", &lost);
-        }
-
-        let down = win::mouse_down();
-        if !on {
-            for (serial, r) in &rects {
-                if let Some(p) = pedals.get_mut(serial) {
-                    p.last = *r;
-                }
-            }
-            continue;
-        }
-
-        if down && dragging.is_none() {
-            // whichever phone is both foreground and has just moved
-            let fg = win::foreground();
-            if let Some((serial, _)) = pedals
-                .iter()
-                .find(|(s, p)| p.hwnd == fg && rects.get(*s).map_or(false, |r| *r != p.last))
-            {
-                let serial = serial.clone();
-                travelling = cluster(&serial, &rects);
-                travelling.remove(&serial);
-                dragging = Some(serial);
-            }
-        }
-
-        if let Some(serial) = dragging.clone() {
-            let (dx, dy) = match (rects.get(&serial), pedals.get(&serial)) {
-                (Some(now), Some(p)) => (now.left - p.last.left, now.top - p.last.top),
-                _ => (0, 0),
-            };
-            if dx != 0 || dy != 0 {
-                for mate in travelling.iter() {
-                    if let (Some(r), Some(p)) = (rects.get(mate), pedals.get(mate)) {
-                        win::move_to(p.hwnd, r.left + dx, r.top + dy);
-                    }
-                }
-            }
-            if !down {
-                // dropped: click onto the nearest edge and bring the group
-                if let Some(now) = win::rect_of(pedals[&serial].hwnd) {
-                    let others: Vec<win::Rect> = rects
-                        .iter()
-                        .filter(|(s, _)| **s != serial && !travelling.contains(*s))
-                        .map(|(_, r)| *r)
-                        .collect();
-                    let area = win::work_area();
-                    let (sx, sy) = snap_offset(&now, &others, &area);
-                    if sx != 0 || sy != 0 {
-                        win::move_to(pedals[&serial].hwnd, now.left + sx, now.top + sy);
-                        for mate in travelling.iter() {
-                            if let (Some(r), Some(p)) = (rects.get(mate), pedals.get(mate)) {
-                                win::move_to(p.hwnd, r.left + sx, r.top + sy);
-                            }
-                        }
-                    }
-                }
-                dragging = None;
-                travelling.clear();
-            }
-        }
-
-        for pedal in pedals.values_mut() {
-            if let Some(r) = win::rect_of(pedal.hwnd) {
-                pedal.last = r;
-            }
-        }
-    }
-}
-
 // ------------------------------------------------------------- commands ----
 
 #[tauri::command]
@@ -430,6 +226,7 @@ struct Started {
 
 /// Where a new phone should land: to the right of the phones already out, so
 /// starting two in a row gives you a magnetised pair without touching them.
+/// Visible coordinates, so "to the right of" means what it looks like.
 fn parking_spot(rects: &[win::Rect], w: i32, h: i32) -> (i32, i32) {
     let area = win::work_area();
     let mut x = area.left + 24;
@@ -500,24 +297,22 @@ fn start_inner(board: &Board, serial: String, opts: Opts) -> Result<Started, Str
     // the unique title was only ever a handle; show the phone's name
     win::rename(hwnd, if opts.name.is_empty() { &serial } else { &opts.name });
 
-    let size = win::rect_of(hwnd).unwrap_or_default();
+    let size = win::visible_rect(hwnd).unwrap_or_default();
     let taken: Vec<win::Rect> = {
         let pedals = board.pedals.lock().unwrap();
-        pedals.values().filter_map(|p| win::rect_of(p.hwnd)).collect()
+        pedals.values().filter_map(|p| win::visible_rect(p.hwnd)).collect()
     };
     let (x, y) = parking_spot(&taken, size.w(), size.h());
-    win::move_to(hwnd, x, y);
+    win::move_visible_to(hwnd, x, y);
     if opts.skin {
         win::round_corners(hwnd, 34);
     }
     win::show(hwnd, true);
     win::activate(hwnd);
-
-    let last = win::rect_of(hwnd).unwrap_or_default();
     let mut pedals = board.pedals.lock().unwrap();
     pedals.insert(
         serial.clone(),
-        Pedal { child: Some(child), hwnd, skin: opts.skin, last },
+        Pedal { child: Some(child), hwnd, skin: opts.skin },
     );
     publish_windows(&pedals);
 
@@ -577,26 +372,11 @@ fn set_skin(state: State<Board>, serial: String, on: bool) -> Result<(), String>
     Ok(())
 }
 
-#[tauri::command]
-fn set_magnet(state: State<Board>, on: bool) {
-    *state.magnet.lock().unwrap() = on;
-}
-
 /// Line the phones up in the given order and stick them together.
 #[tauri::command]
 fn arrange(state: State<Board>, order: Vec<String>) {
     let pedals = state.pedals.lock().unwrap();
-    let area = win::work_area();
-    let mut x = area.left + 24;
-    let y = area.top + 24;
-    for serial in order {
-        if let Some(pedal) = pedals.get(&serial) {
-            if let Some(r) = win::rect_of(pedal.hwnd) {
-                win::move_to(pedal.hwnd, x, y);
-                x += r.w();
-            }
-        }
-    }
+    magnet::arrange(&pedals, &order);
 }
 
 #[tauri::command]
@@ -703,8 +483,7 @@ fn readopt(board: &Board) {
         if !win::is_window(hwnd) || win::owner_exe(hwnd) != "scrcpy.exe" {
             continue;
         }
-        let last = win::rect_of(hwnd).unwrap_or_default();
-        pedals.insert(serial, Pedal { child: None, hwnd, skin: false, last });
+        pedals.insert(serial, Pedal { child: None, hwnd, skin: false });
     }
     publish_windows(&pedals);
 }
@@ -774,6 +553,29 @@ fn devices() -> Vec<(String, String, String)> {
 fn selftest(what: String) -> i32 {
     let board = Board::default();
 
+    if what == "drags" {
+        // the magnet takes its cue from the shell rather than from guessing,
+        // so this is what it hears while you push a phone around
+        println!("watching for 25 seconds - drag a phone window about");
+        let drags = win::watch_drags();
+        let deadline = Instant::now() + Duration::from_secs(25);
+        let mut seen = 0;
+        while Instant::now() < deadline {
+            while let Ok(event) = drags.try_recv() {
+                seen += 1;
+                match event {
+                    win::Drag::Started(h) => println!(
+                        "  grabbed   {:>10}  {}", h, win::owner_exe(h)),
+                    win::Drag::Ended(h) => println!(
+                        "  dropped   {:>10}  {:?}", h, win::visible_rect(h)),
+                }
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        println!("{} events", seen);
+        return if seen > 0 { 0 } else { 1 };
+    }
+
     if what == "autostart" {
         let before = startup::enabled();
         println!("enabled to begin with: {}", before);
@@ -829,13 +631,13 @@ fn selftest(what: String) -> i32 {
             .lock()
             .unwrap()
             .iter()
-            .filter_map(|(s, p)| win::rect_of(p.hwnd).map(|r| (s.clone(), r)))
+            .filter_map(|(s, p)| win::visible_rect(p.hwnd).map(|r| (s.clone(), r)))
             .collect();
         for (serial, r) in &rects {
             println!("{} at {},{} {}x{}", serial, r.left, r.top, r.w(), r.h());
         }
         if rects.len() > 1 {
-            let touching = adjacent(&rects[0].1, &rects[1].1);
+            let touching = magnet::adjacent(&rects[0].1, &rects[1].1);
             println!("parked flush against each other: {}", touching);
         }
         if what == "keep" {
@@ -861,7 +663,7 @@ fn selftest(what: String) -> i32 {
     }
     let hwnd = board.pedals.lock().unwrap().get(&serial).map(|p| p.hwnd).unwrap_or(0);
     println!("window alive: {}", win::is_window(hwnd));
-    println!("rect: {:?}", win::rect_of(hwnd));
+    println!("rect: {:?}", win::visible_rect(hwnd));
     println!("published: {}", std::fs::read_to_string(local_dir().join("windows.json"))
         .unwrap_or_default().split_whitespace().collect::<Vec<_>>().join(" "));
 
@@ -895,7 +697,76 @@ fn hide_board(app: tauri::AppHandle) {
     }
 }
 
+/// The page has just changed height. Put the panel back in its corner and
+/// round the window itself off - a border-radius in CSS only paints inside a
+/// square window, and the square shows.
+#[tauri::command]
+fn settled(app: tauri::AppHandle) {
+    park_over_tray(&app);
+    if let Some(window) = app.get_webview_window("main") {
+        if let Ok(handle) = window.window_handle() {
+            if let RawWindowHandle::Win32(h) = handle.as_raw() {
+                win::round_corners(h.hwnd.get(), 14);
+            }
+        }
+    }
+}
+
+/// A panel that belongs to a tray icon should come up beside the tray.
+///
+/// Which means asking where the tray is rather than assuming: the taskbar can
+/// be on any of the four edges, it can be on a second monitor, and on a
+/// right-to-left Windows the notification area sits at the *left* end of it.
+fn park_over_tray(app: &tauri::AppHandle) {
+    const GAP: i32 = 12;
+    let window = match app.get_webview_window("main") {
+        Some(w) => w,
+        None => return,
+    };
+    let size = match window.outer_size() {
+        Ok(s) => s,
+        Err(_) => return,
+    };
+    let (w, h) = (size.width as i32, size.height as i32);
+
+    let tray = win::tray_area();
+    let bar = win::taskbar().map(|(rect, _)| rect).or(tray);
+    let anchor = tray.or(bar);
+
+    let (cx, cy) = match anchor {
+        Some(r) => ((r.left + r.right) / 2, (r.top + r.bottom) / 2),
+        None => {
+            let area = win::work_area();
+            (area.right, area.bottom)
+        }
+    };
+    let area = win::work_area_at(cx, cy);
+    let edge = bar.map(|r| win::edge_of(&r, &area)).unwrap_or(win::Edge::Bottom);
+
+    let clamp = |v: i32, lo: i32, hi: i32| v.max(lo).min(hi.max(lo));
+    let (x, y) = match edge {
+        win::Edge::Bottom => (
+            clamp(cx - w / 2, area.left + GAP, area.right - w - GAP),
+            area.bottom - h - GAP,
+        ),
+        win::Edge::Top => (
+            clamp(cx - w / 2, area.left + GAP, area.right - w - GAP),
+            area.top + GAP,
+        ),
+        win::Edge::Left => (
+            area.left + GAP,
+            clamp(cy - h / 2, area.top + GAP, area.bottom - h - GAP),
+        ),
+        win::Edge::Right => (
+            area.right - w - GAP,
+            clamp(cy - h / 2, area.top + GAP, area.bottom - h - GAP),
+        ),
+    };
+    let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+}
+
 fn reveal(app: &tauri::AppHandle) {
+    park_over_tray(app);
     if let Some(window) = app.get_webview_window("main") {
         let _ = window.show();
         let _ = window.unminimize();
@@ -911,15 +782,12 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
     let show = MenuItem::with_id(app, "show", "Show the board", true, None::<&str>)?;
-    let magnet = CheckMenuItem::with_id(
-        app, "magnet", "Magnet", true,
-        *app.state::<Board>().magnet.lock().unwrap(), None::<&str>)?;
     let login = CheckMenuItem::with_id(
         app, "login", "Start at login", true, startup::enabled(), None::<&str>)?;
     let quit = MenuItem::with_id(app, "quit", "Quit (phones stay up)", true, None::<&str>)?;
     let menu = Menu::with_items(
         app,
-        &[&show, &PredefinedMenuItem::separator(app)?, &magnet, &login,
+        &[&show, &PredefinedMenuItem::separator(app)?, &login,
           &PredefinedMenuItem::separator(app)?, &quit],
     )?;
 
@@ -929,12 +797,6 @@ fn build_tray(app: &tauri::AppHandle) -> tauri::Result<()> {
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
             "show" => reveal(app),
-            "magnet" => {
-                let board = app.state::<Board>();
-                let mut on = board.magnet.lock().unwrap();
-                *on = !*on;
-                let _ = app.emit("magnet-changed", *on);
-            }
             "login" => {
                 let want = !startup::enabled();
                 if let Err(e) = startup::set(want) {
@@ -1003,7 +865,6 @@ fn main() {
     tauri::Builder::default()
         .manage(Board::default())
         .setup(move |app| {
-            *app.state::<Board>().magnet.lock().unwrap() = true;
             readopt(&app.state::<Board>());
             start_daemon();
             build_tray(app.handle())?;
@@ -1011,9 +872,14 @@ fn main() {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.hide();
                 }
+            } else {
+                park_over_tray(app.handle());
             }
+            // the shell tells us when a drag starts and ends; the magnet loop
+            // only has to carry the group and watch how hard it is thrown
+            let drags = win::watch_drags();
             let handle = app.handle().clone();
-            std::thread::spawn(move || magnet_loop(handle));
+            std::thread::spawn(move || magnet::run(handle, drags));
             Ok(())
         })
         // closing the window only puts it away: the phones are ordinary
@@ -1025,9 +891,9 @@ fn main() {
             }
         })
         .invoke_handler(tauri::generate_handler![
-            probe, start, stop, running, set_skin, set_magnet, arrange,
+            probe, start, stop, running, set_skin, arrange,
             focus_device, action, rotate, status, open_logs,
-            autostart_state, set_autostart, hide_board
+            autostart_state, set_autostart, hide_board, settled
         ])
         .run(tauri::generate_context!())
         .expect("board failed to start");

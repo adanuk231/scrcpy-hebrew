@@ -1,11 +1,12 @@
 :root {
   --ink: #e9edf6;
   --dim: #8b96ad;
+  --faint: #5d6578;
   --bg: #0c0f16;
-  --panel: rgba(255, 255, 255, 0.045);
   --edge: rgba(255, 255, 255, 0.09);
+  --panel: rgba(255, 255, 255, 0.04);
   --live: #7ab2ff;
-  --warm: #ffd479;
+  --warm: #ffc759;
 }
 
 * { box-sizing: border-box; }
@@ -13,142 +14,96 @@
 html, body {
   margin: 0;
   height: 100%;
+  overflow: hidden;
   background: var(--bg);
   color: var(--ink);
   font: 13px/1.35 "Segoe UI", system-ui, sans-serif;
   user-select: none;
-  overflow: hidden;
+  cursor: default;
 }
 
 body {
   display: flex;
   flex-direction: column;
+  border: 1px solid rgba(255, 255, 255, 0.13);
+  border-radius: 12px;
   background:
-    radial-gradient(120% 80% at 15% -10%, rgba(122, 178, 255, 0.10), transparent 60%),
-    radial-gradient(90% 60% at 110% 110%, rgba(255, 212, 121, 0.07), transparent 60%),
+    radial-gradient(120% 70% at 12% -10%, rgba(122, 178, 255, 0.11), transparent 62%),
+    radial-gradient(90% 60% at 110% 108%, rgba(255, 199, 89, 0.07), transparent 60%),
     var(--bg);
 }
 
-/* ------------------------------------------------------------- chrome -- */
+button { font: inherit; cursor: pointer; }
+svg { width: 15px; height: 15px; display: block; }
+svg [fill="none"] { stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; }
+svg rect, svg circle[fill]:not([fill="none"]) { fill: currentColor; }
+
+/* -------------------------------------------------------------- header -- */
 
 .bar {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 8px 10px;
+  gap: 4px;
+  padding: 9px 10px;
   border-bottom: 1px solid var(--edge);
-  -webkit-app-region: drag;
-}
-
-.foot {
-  border-bottom: 0;
-  border-top: 1px solid var(--edge);
-  font-size: 11px;
-  color: var(--dim);
-}
-
-.bar h1 {
-  font-size: 13px;
-  font-weight: 600;
-  letter-spacing: 0.12em;
-  text-transform: uppercase;
-  margin: 0 auto 0 0;
-  color: var(--dim);
 }
 
 .mark {
-  width: 12px;
-  height: 12px;
+  width: 11px;
+  height: 11px;
   border-radius: 3px;
-  background: linear-gradient(140deg, var(--live), #2e3a52);
-  box-shadow: 0 0 0 1px var(--edge);
+  background: linear-gradient(140deg, var(--live) 48%, var(--warm) 52%);
+  flex: none;
 }
 
-.chip {
-  -webkit-app-region: no-drag;
-  border: 1px solid var(--edge);
-  background: var(--panel);
-  color: var(--dim);
-  border-radius: 999px;
-  padding: 3px 10px;
-  font: inherit;
+.wordmark {
   font-size: 11px;
-  cursor: pointer;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--dim);
+  margin-right: auto;
+  padding-left: 4px;
 }
 
-.chip:hover { color: var(--ink); }
-
-.chip.on {
-  color: #0b0e14;
-  background: var(--live);
-  border-color: transparent;
+.ico {
+  border: 0;
+  background: transparent;
+  color: var(--faint);
+  padding: 5px;
+  border-radius: 7px;
+  display: grid;
+  place-items: center;
 }
 
-.chip.ghost { padding: 3px 8px; }
+.ico:hover { color: var(--ink); background: var(--panel); }
+.ico:active { transform: translateY(1px); }
+.ico.on { color: var(--live); }
 
-#note { margin-left: auto; }
+/* --------------------------------------------------------------- main --- */
 
-/* -------------------------------------------------------------- rack --- */
-
-#rack {
+main {
   flex: 1;
   overflow-y: auto;
   overflow-x: hidden;
-  padding: 10px;
-  display: flex;
-  flex-direction: column;
-  gap: 10px;
 }
 
-#rack::-webkit-scrollbar { width: 8px; }
-#rack::-webkit-scrollbar-thumb {
-  background: rgba(255, 255, 255, 0.12);
-  border-radius: 8px;
-}
+main::-webkit-scrollbar { width: 7px; }
+main::-webkit-scrollbar-thumb { background: rgba(255,255,255,.12); border-radius: 7px; }
 
-.pedal {
-  border: 1px solid var(--edge);
-  border-radius: 14px;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02));
-  box-shadow: 0 8px 20px rgba(0, 0, 0, 0.35), inset 0 1px 0 rgba(255, 255, 255, 0.06);
-  overflow: hidden;
-  transition: transform 0.14s ease, opacity 0.14s ease;
-}
+#deck, #settings { padding: 10px; }
 
-.pedal.live { border-color: rgba(122, 178, 255, 0.42); }
-.pedal.busy { opacity: 0.55; }
-.pedal.lifted {
-  transform: scale(1.02);
-  box-shadow: 0 16px 34px rgba(0, 0, 0, 0.5);
-  z-index: 3;
-  position: relative;
-}
-.pedal.gone { opacity: 0.4; }
+/* ----------------------------------------------------------- the phone -- */
 
-/* ------------------------------------------------------------- header -- */
-
-.grip {
+.who {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 9px 10px;
-  cursor: grab;
-  border-bottom: 1px solid var(--edge);
+  padding: 2px 2px 10px;
 }
 
-.grip:active { cursor: grabbing; }
-
-.dots {
-  width: 9px;
-  height: 14px;
-  flex: none;
-  background-image: radial-gradient(circle, var(--dim) 1px, transparent 1.2px);
-  background-size: 4px 4px;
-  opacity: 0.75;
-}
-
-.name {
+.who .name {
+  font-size: 15px;
   font-weight: 600;
   white-space: nowrap;
   overflow: hidden;
@@ -171,34 +126,29 @@ body {
   background: rgba(0, 0, 0, 0.25);
 }
 
-.badges b.uhid { color: var(--live); border-color: rgba(122, 178, 255, 0.35); }
-.badges b.low { color: var(--warm); border-color: rgba(255, 212, 121, 0.35); }
+.badges b.uhid { color: var(--live); border-color: rgba(122,178,255,.35); }
+.badges b.low { color: var(--warm); border-color: rgba(255,199,89,.35); }
 
 .power {
   flex: none;
-  width: 26px;
-  height: 26px;
+  width: 28px;
+  height: 28px;
   border-radius: 50%;
   border: 1px solid var(--edge);
   background: rgba(0, 0, 0, 0.3);
   color: var(--dim);
-  cursor: pointer;
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .power::after { content: "\25B6"; }
-.pedal.live .power {
-  color: #0b0e14;
-  background: var(--live);
-  border-color: transparent;
-}
-.pedal.live .power::after { content: "\25A0"; }
+body.live .power { color: #0b0e14; background: var(--live); border-color: transparent; }
+body.live .power::after { content: "\25A0"; }
+.power:disabled { opacity: .35; cursor: not-allowed; }
 
-/* -------------------------------------------------------------- knobs -- */
+/* -------------------------------------------------------------- knobs --- */
 
-.knobs { padding: 8px 10px 4px; display: flex; flex-direction: column; gap: 6px; }
-
-.row { display: flex; align-items: center; gap: 8px; }
+.knobs { display: flex; flex-direction: column; gap: 7px; }
+.row { display: flex; align-items: center; gap: 9px; }
 
 .row label {
   width: 34px;
@@ -222,16 +172,15 @@ body {
   border-right: 1px solid var(--edge);
   background: transparent;
   color: var(--dim);
-  font: inherit;
   font-size: 11px;
-  padding: 4px 0;
-  cursor: pointer;
+  padding: 5px 0;
 }
 
 .seg button:last-child { border-right: 0; }
-.seg button:hover:not(:disabled) { color: var(--ink); }
+.seg button:hover { color: var(--ink); }
 .seg button.on { background: rgba(122, 178, 255, 0.18); color: var(--ink); }
-.seg button:disabled { opacity: 0.3; cursor: not-allowed; }
+.seg button.blocked { color: var(--faint); opacity: .45; }
+.seg button.blocked.on { background: rgba(255, 199, 89, .12); }
 
 .flags { flex-wrap: wrap; gap: 5px; }
 
@@ -240,22 +189,24 @@ body {
   background: rgba(0, 0, 0, 0.28);
   color: var(--dim);
   border-radius: 7px;
-  padding: 3px 8px;
-  font: inherit;
+  padding: 4px 9px;
   font-size: 11px;
-  cursor: pointer;
 }
 
 .flag:hover { color: var(--ink); }
-.flag.on { background: rgba(122, 178, 255, 0.18); color: var(--ink); border-color: rgba(122, 178, 255, 0.4); }
+.flag.on {
+  background: rgba(122, 178, 255, 0.18);
+  color: var(--ink);
+  border-color: rgba(122, 178, 255, 0.4);
+}
 
-/* --------------------------------------------------------------- pads -- */
+/* --------------------------------------------------------------- pads --- */
 
 .pads {
   display: flex;
   align-items: center;
   gap: 5px;
-  padding: 8px 10px 10px;
+  padding-top: 10px;
 }
 
 .pads button {
@@ -264,22 +215,164 @@ body {
   background: rgba(0, 0, 0, 0.3);
   color: var(--dim);
   border-radius: 8px;
-  padding: 5px 0;
-  font: inherit;
-  cursor: pointer;
+  padding: 6px 0;
 }
 
-.pads button:hover { color: var(--ink); background: rgba(255, 255, 255, 0.06); }
+.pads button:hover { color: var(--ink); background: rgba(255,255,255,.06); }
 .pads button:active { transform: translateY(1px); }
 .pads button.warm:hover { color: var(--warm); }
 .pads .gap { width: 6px; flex: none; }
 
 .why {
-  margin: 0;
-  padding: 0 10px 9px;
+  margin: 10px 0 0;
   font-size: 11px;
+  line-height: 1.4;
   color: var(--warm);
-  min-height: 0;
+  min-height: 15px;
 }
 
-.why:empty { display: none; }
+.why.quiet { color: var(--dim); }
+
+/* ----------------------------------------------------------- settings --- */
+
+#settings h2 {
+  margin: 2px 0 12px;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--dim);
+}
+
+.switch {
+  display: grid;
+  grid-template-columns: 44px 1fr;
+  align-items: center;
+  gap: 3px 8px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--edge);
+  cursor: pointer;
+}
+
+/* the checkbox is display:none, so both bits of text have to be told which
+   column they are in or they fall into the one the switch lives in */
+.switch span { grid-column: 2; position: relative; }
+.switch small { grid-column: 2; color: var(--faint); font-size: 11px; }
+.switch input { display: none; }
+
+.switch input + span::before {
+  content: "";
+  position: absolute;
+  left: -44px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 34px;
+  height: 18px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.1);
+  border: 1px solid var(--edge);
+  transition: background 0.15s ease;
+}
+
+.switch input + span::after {
+  content: "";
+  position: absolute;
+  left: -41px;
+  top: 50%;
+  transform: translateY(-50%);
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--dim);
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+
+.switch input:checked + span::before { background: rgba(122, 178, 255, 0.35); }
+.switch input:checked + span::after {
+  background: var(--live);
+  transform: translate(14px, -50%);
+}
+
+#settings .note {
+  margin: 14px 0;
+  font-size: 11px;
+  line-height: 1.5;
+  color: var(--faint);
+}
+
+.wide {
+  width: 100%;
+  border: 1px solid var(--edge);
+  background: var(--panel);
+  color: var(--dim);
+  border-radius: 8px;
+  padding: 7px 0;
+  font-size: 12px;
+}
+
+.wide:hover { color: var(--ink); }
+
+/* --------------------------------------------------------------- tabs --- */
+
+.tabs {
+  display: flex;
+  align-items: stretch;
+  gap: 6px;
+  border-top: 1px solid var(--edge);
+  padding: 7px 8px;
+  background: rgba(0, 0, 0, 0.25);
+}
+
+.strip {
+  display: flex;
+  gap: 6px;
+  flex: 1;
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.strip::-webkit-scrollbar { height: 0; }
+
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: none;
+  border: 1px solid var(--edge);
+  background: rgba(0, 0, 0, 0.3);
+  color: var(--dim);
+  border-radius: 8px;
+  padding: 5px 10px;
+  font-size: 12px;
+  white-space: nowrap;
+  transition: transform 0.12s ease;
+}
+
+.tab:hover { color: var(--ink); }
+
+.tab.on {
+  color: var(--ink);
+  border-color: rgba(122, 178, 255, 0.45);
+  background: rgba(122, 178, 255, 0.14);
+}
+
+.tab .dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--faint);
+  flex: none;
+}
+
+.tab.running .dot { background: var(--live); box-shadow: 0 0 6px rgba(122,178,255,.8); }
+.tab.lifted { transform: scale(1.06); z-index: 2; }
+
+/* the gear does not scroll away with the phones */
+.gear {
+  flex: none;
+  align-self: center;
+  border-left: 1px solid var(--edge);
+  border-radius: 0;
+  padding-left: 9px;
+  margin-left: 2px;
+}

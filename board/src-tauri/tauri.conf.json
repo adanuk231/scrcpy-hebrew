@@ -13,12 +13,14 @@
         "label": "main",
         "width": 396,
         "height": 660,
-        "minWidth": 320,
-        "minHeight": 260,
-        "resizable": true,
-        "decorations": true,
-        "alwaysOnTop": false,
-        "theme": "Dark"
+        "resizable": false,
+        "decorations": false,
+        "transparent": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "visible": true,
+        "theme": "Dark",
+        "shadow": true
       }
     ],
     "security": {
