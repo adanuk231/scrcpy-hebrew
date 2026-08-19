@@ -92,9 +92,28 @@ scrcpy-he.cmd -s SERIAL --stay-awake --window-width 400
 
 Then switch your Windows keyboard to Hebrew and type. That is the whole thing.
 
+### No console window
+
+`scrcpy-he.cmd` is meant for a terminal you are already in: scrcpy inherits that
+console and prints its log there. From a shortcut that console is just a black
+window sitting behind the phone for the whole session - and if you ever click
+inside it, Windows' QuickEdit pauses the process and scrcpy freezes with it.
+
+So for shortcuts use `scrcpy-he.vbs`, which starts everything hidden:
+
+```
+wscript.exe "W:\path\to\scrcpy-he.vbs" -s SERIAL --stay-awake
+```
+
+Nothing flashes, and scrcpy's output goes to
+`%LOCALAPPDATA%\scrcpy-hebrew\scrcpy-<serial>.log` instead. The launcher decides
+this by itself - whenever it has no console to inherit (`.vbs`, `pythonw.exe`, a
+shortcut) scrcpy is started with `CREATE_NO_WINDOW` and redirected to that log;
+run it from a terminal and it behaves exactly as before.
+
 To point an existing desktop shortcut at it, change the shortcut's target from
-`scrcpy.exe` to the full path of `scrcpy-he.cmd` and keep the arguments as they
-are (drop `--legacy-paste` if it is there).
+`scrcpy.exe` to `wscript.exe "<full path>\scrcpy-he.vbs"` and keep the arguments
+as they are (drop `--legacy-paste` if it is there).
 
 `probe` tells you which mode each connected phone will use:
 

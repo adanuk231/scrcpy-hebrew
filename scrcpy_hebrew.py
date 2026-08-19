@@ -97,6 +97,7 @@ def dlog(msg):
 
 user32 = ctypes.WinDLL("user32", use_last_error=True)
 kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+kernel32.GetConsoleWindow.restype = wt.HWND
 ULONG_PTR = ctypes.c_ulonglong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_ulong
 
 
@@ -146,6 +147,7 @@ CF_UNICODETEXT = 13
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_SCANCODE = 0x0008
 KEYEVENTF_EXTENDEDKEY = 0x0001
+CREATE_NO_WINDOW = 0x08000000
 
 VK_BACK, VK_SPACE = 0x08, 0x20
 VK_SHIFT, VK_CONTROL, VK_MENU, VK_CAPITAL = 0x10, 0x11, 0x12, 0x14
@@ -905,14 +907,28 @@ def run_launch(argv):
     if serial and not any(a.startswith("--window-title") for a in args):
         args.append("--window-title=%s" % window_title_for(serial, devices))
 
-    print("scrcpy-hebrew: %s -> %s mode" % (serial or "?", mode))
+    # from a shortcut, the .vbs or pythonw there is no console to inherit - so
+    # scrcpy must not be handed one, or a bare cmd window sits there for the
+    # whole session
+    headless = not kernel32.GetConsoleWindow()
+    (log if headless else print)("scrcpy-hebrew: %s -> %s mode"
+                                 % (serial or "?", mode))
 
     here = os.path.dirname(os.path.abspath(__file__))
     pythonw = os.path.join(os.path.dirname(sys.executable), "pythonw.exe")
     subprocess.Popen([pythonw if os.path.exists(pythonw) else sys.executable,
                       os.path.join(here, "scrcpy_hebrew.py"), "daemon"],
                      creationflags=0x08000008)          # NO_WINDOW | DETACHED
-    return subprocess.call([scrcpy_exe()] + args)
+
+    if not headless:
+        return subprocess.call([scrcpy_exe()] + args)
+
+    os.makedirs(LOG_DIR, exist_ok=True)
+    out_path = os.path.join(LOG_DIR, "scrcpy-%s.log" % (serial or "device"))
+    with open(out_path, "w", encoding="utf-8", errors="replace") as out:
+        return subprocess.call([scrcpy_exe()] + args, stdout=out,
+                               stderr=subprocess.STDOUT,
+                               creationflags=CREATE_NO_WINDOW)
 
 
 def main():
