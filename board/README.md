@@ -126,7 +126,17 @@ The `aspect` selftest checks that agreement at every step, because this fails
 silently: a window that resizes around a picture that does not.
 
 With no sizing border there is nothing for the mouse to grab, which is why the
-resize icon exists and drags a corner by hand.
+resize icon exists and drags a corner by hand. It moves the window sixty times
+a second rather than at the speed of the drag: every size change asks the phone
+for a fresh frame at a new shape, and until it arrives the last one is stretched
+to fit.
+
+How sharp that stays as the window grows is not about the window at all - it is
+how many pixels the phone is sending. `size` is `native` by default, which is
+the phone's own resolution and as good as it gets; set it to 720 and a window
+any bigger than that is stretching what it has. The tests that only measure a
+window use 720 because it starts faster, but the branch that leaves phones
+running for real use starts them the way the app does.
 
 ## Magnet
 

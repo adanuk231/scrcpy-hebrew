@@ -658,7 +658,11 @@ fn resize_by_hand(hwnd: isize, aspect: Option<f64>) {
                     shape,
                 );
                 win::place_visible(hwnd, rect.left, rect.top, w, h);
-                std::thread::sleep(Duration::from_millis(8));
+                // slower than the drag: every size change asks the phone for a
+                // fresh frame at a new shape, and between the two the last one
+                // is stretched to fit. Sixty a second is smooth and leaves it
+                // time to draw
+                std::thread::sleep(Duration::from_millis(16));
             }
             win::post_drag(win::Drag::Ended(hwnd));
         }
@@ -794,6 +798,14 @@ fn start_daemon() {
 ///   selftest hover      which phone is under a point, and hand-made drags
 ///   selftest remember   a phone opens where it was last left
 ///   selftest lineup     lining a row up leaves it where it stands
+/// What the app itself would start a phone with: the picture at the phone's
+/// own resolution and no frame rate cap. Anything less and enlarging the
+/// window stretches pixels, because there are no more of them to draw.
+fn live_opts(name: &str, keyboard: &str) -> Opts {
+    Opts { max_size: 0, max_fps: 0, height: 760, ..test_opts(name, keyboard) }
+}
+
+/// Cheap and small, for the tests that start a phone only to measure it.
 fn test_opts(name: &str, keyboard: &str) -> Opts {
     Opts {
         audio: "off".into(),
@@ -1142,7 +1154,7 @@ fn selftest(what: String) -> i32 {
             return 1;
         }
         for (serial, name, keyboard) in &list {
-            match start_inner(&board, serial.clone(), test_opts(name, keyboard)) {
+            match start_inner(&board, serial.clone(), live_opts(name, keyboard)) {
                 Ok(started) => println!("{} started, hwnd {}", name, started.hwnd),
                 Err(e) => {
                     println!("{} FAILED: {}", name, e);
