@@ -19,6 +19,7 @@ use std::io::Write;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -543,14 +544,64 @@ fn aimed_at(app: &tauri::AppHandle) -> Option<String> {
     app.state::<Mutex<Aim>>().lock().unwrap().serial.clone()
 }
 
+/// Drag the phone the icons are sitting on.
+///
+/// The tidy way is to ask the phone to start the move loop it would start from
+/// its own title bar. That does not survive being asked from another process:
+/// the loop wants the mouse capture, and whether it gets it depends on who is
+/// in the foreground and on what the webview did with the button that is
+/// already held down. It worked once and then never again. So the board moves
+/// the window itself and tells the magnet the same two things the shell would
+/// have said, which leaves the group travelling, ctrl peeling one off and the
+/// snap on landing all working off the one path they already used.
 #[tauri::command]
 fn strip_drag(app: tauri::AppHandle, state: State<Board>) {
-    if let Some(serial) = aimed_at(&app) {
-        let pedals = state.pedals.lock().unwrap();
-        if let Some(pedal) = pedals.get(&serial) {
-            win::begin_move(pedal.hwnd);
-        }
+    let serial = match aimed_at(&app) {
+        Some(serial) => serial,
+        None => return,
+    };
+    let hwnd = match state.pedals.lock().unwrap().get(&serial) {
+        Some(pedal) => pedal.hwnd,
+        None => return,
+    };
+    let strip = app.state::<Mutex<Aim>>().lock().unwrap().hwnd;
+    drag_by_hand(hwnd, strip);
+}
+
+static DRAG_BY_HAND: AtomicBool = AtomicBool::new(false);
+
+fn drag_by_hand(hwnd: isize, strip: isize) {
+    // a click that is already over by the time the message reaches us is not a
+    // drag, and one drag at a time is enough
+    if !win::mouse_down() || DRAG_BY_HAND.swap(true, Ordering::SeqCst) {
+        return;
     }
+    std::thread::spawn(move || {
+        if let Some(rect) = win::visible_rect(hwnd) {
+            let grab = win::cursor_pos();
+            let origin = (rect.left, rect.top);
+            // the icons are carried along by hand as well, at the same rate as
+            // the phone: left to the magnet's own tick they trail the cursor
+            // by a frame or two, which on a quick throw is a visible slither
+            let icons = win::rect_of(strip).map(|r| (r.left, r.top));
+            win::post_drag(win::Drag::Started(hwnd));
+            // the magnet reads where everything is once a tick: let it see the
+            // phone still where it was grabbed, or whatever it is carrying
+            // starts out as far behind as the first frame of the drag moved it
+            std::thread::sleep(Duration::from_millis(45));
+            while win::mouse_down() {
+                let now = win::cursor_pos();
+                let (dx, dy) = (now.0 - grab.0, now.1 - grab.1);
+                win::move_visible_to(hwnd, origin.0 + dx, origin.1 + dy);
+                if let Some((x, y)) = icons {
+                    win::move_to(strip, x + dx, y + dy);
+                }
+                std::thread::sleep(Duration::from_millis(8));
+            }
+            win::post_drag(win::Drag::Ended(hwnd));
+        }
+        DRAG_BY_HAND.store(false, Ordering::SeqCst);
+    });
 }
 
 #[tauri::command]
@@ -642,6 +693,7 @@ fn start_daemon() {
 ///   selftest all        every phone, and check they parked flush
 ///   selftest keep       every phone, left running
 ///   selftest readopt    pick up phones left running, then close them
+///   selftest hover      which phone is under a point, and hand-made drags
 fn test_opts(name: &str, keyboard: &str) -> Opts {
     Opts {
         audio: "off".into(),
@@ -802,6 +854,48 @@ fn selftest(what: String) -> i32 {
         }
         println!("{} events", seen);
         return if seen > 0 { 0 } else { 1 };
+    }
+
+    if what == "hover" {
+        // the two new things behind dragging a phone by its floating icons:
+        // knowing which phone a point on the screen belongs to, and being able
+        // to tell the magnet a drag has started when the shell has no idea one
+        // has, because we are the ones moving the window
+        let list = devices();
+        if list.is_empty() {
+            println!("no phones");
+            return 1;
+        }
+        let (serial, name, keyboard) = list[0].clone();
+        if let Err(e) = start_inner(&board, serial.clone(), test_opts(&name, &keyboard)) {
+            println!("{} FAILED: {}", name, e);
+            return 1;
+        }
+        let hwnd = board.pedals.lock().unwrap()[&serial].hwnd;
+        let rect = win::visible_rect(hwnd).unwrap_or_default();
+        let middle = ((rect.left + rect.right) / 2, (rect.top + rect.bottom) / 2);
+        let under = win::top_level_at(middle.0, middle.1);
+        println!("phone at {},{} {}x{}", rect.left, rect.top, rect.w(), rect.h());
+        println!("under {},{}: {} (want {})", middle.0, middle.1, under, hwnd);
+        // a point on the desktop well clear of it should not answer the phone
+        let outside = win::top_level_at(rect.left - 40, rect.top - 40);
+        println!("clear of it:  {}", outside);
+
+        let drags = win::watch_drags();
+        win::post_drag(win::Drag::Started(hwnd));
+        win::post_drag(win::Drag::Ended(hwnd));
+        std::thread::sleep(Duration::from_millis(120));
+        let mut heard = Vec::new();
+        while let Ok(event) = drags.try_recv() {
+            heard.push(match event {
+                win::Drag::Started(h) => format!("grabbed {}", h),
+                win::Drag::Ended(h) => format!("dropped {}", h),
+            });
+        }
+        println!("magnet heard: {:?}", heard);
+        stop_inner(&board, &serial);
+        let ok = under == hwnd && outside != hwnd && heard.len() == 2;
+        return if ok { 0 } else { 1 };
     }
 
     if what == "autostart" {

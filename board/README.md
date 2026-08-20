@@ -69,26 +69,40 @@ work on a phone you are mirroring with `look` on.
 ## The phones have no title bar
 
 A phone window is the picture and nothing else. What a title bar was for now
-floats over the top of whichever phone has the keyboard: a handle to drag it
-by, rounded corners on and off, show this phone on the board, and stop
-mirroring. Icons only, on a window with no background at all - the strip is
-transparent, so the only thing on screen is the marks, which carry their own
-shadow to stay readable over any picture.
+floats over the phone you are pointing at: a handle to drag it by, rounded
+corners on and off, show this phone on the board, and stop mirroring. Icons
+only, on a window with no background at all - the strip is transparent, so the
+only thing on screen is the marks, which carry their own shadow to stay
+readable over any picture.
 
-One strip, not one per phone. Only one phone can have the keyboard at a time,
-and a second webview hanging over every phone is a lot of machinery for a row
-of four icons. It follows the focused phone, sits just above it (or just inside
-the top, if the phone is against the top of the screen), and parks off-screen
-when you are working somewhere else - with a moment's grace, so a wobble in the
-focus does not snatch the icons out from under the cursor.
+**Point at a phone and the icons appear.** Not click: a phone you have not
+clicked on has no title bar either, and clicking it to bring up the icons would
+tap whatever is on the screen underneath. Whatever is under the pointer wins,
+then the phone being dragged, then the one with the keyboard - and moving the
+pointer onto the icons themselves keeps them where they are. They park
+off-screen a moment after you leave, so crossing a gap on the way to them does
+not make them flicker. The strip never takes the focus, so a phone can be moved
+without your editor losing it.
+
+One strip, not one per phone. You can only point at one at a time, and a second
+webview hanging over every phone is a lot of machinery for a row of four icons.
+It sits just above the phone, or just inside the top if the phone is against
+the top of the screen.
 
 Two things this needed. `--window-borderless` takes `WS_THICKFRAME` off along
 with the title bar, and without it a window cannot be resized at all, so it is
 put back: Windows then gives the invisible grab margin without drawing
-anything, since there is no caption to draw a frame around. And a window with
-no caption is dragged by asking it to start the move loop it would have started
-from one, which is `WM_NCLBUTTONDOWN` with `HTCAPTION` - so the magnet sees an
-ordinary drag and behaves exactly as it does for any other.
+anything, since there is no caption to draw a frame around.
+
+And **the board moves the phone itself**. The tidy way is to ask the window to
+start the move loop it would start from its own title bar - `WM_NCLBUTTONDOWN`
+with `HTCAPTION` - but that does not survive being asked from another process:
+the loop wants the mouse capture, and whether it gets it depends on who is in
+the foreground and on what the webview did with the button that is already
+held down. It worked once and then never again. So a thread follows the cursor
+while the button is down, moves the window, and posts the same two events the
+shell would have posted - which leaves the group travelling, ctrl peeling one
+off and the snap on landing all working off the one path they already used.
 
 ## Magnet
 
@@ -124,9 +138,11 @@ again when the phone rotates.
 `line them up` puts every running phone in a row, in tab order; dragging a tab
 sideways reorders and re-lays them out.
 
-Two things make this work that are worth writing down. Windows tells us when a
-drag starts and ends (`EVENT_SYSTEM_MOVESIZESTART`), so nothing has to be
-inferred from the mouse button and the foreground window. And every measurement
+Two things make this work that are worth writing down. A drag announces itself
+- either the shell says so (`EVENT_SYSTEM_MOVESIZESTART`, for a resize, which
+is still a real move loop) or the board says so because it is the one moving
+the window - so nothing has to be inferred from the mouse button and the
+foreground window. And every measurement
 is in *visible* coordinates: `GetWindowRect` returns the extended bounds, which
 on Windows 10 include about seven invisible pixels of resize border a side, so
 snapping those rectangles flush leaves a fourteen pixel gap on screen and
@@ -203,6 +219,7 @@ scrcpy-board.exe selftest keep       # every phone, left running
 scrcpy-board.exe selftest readopt    # pick up phones left running, then close
 scrcpy-board.exe selftest autostart  # the Run key round-trips and restores
 scrcpy-board.exe selftest drags      # what the shell reports while you drag a phone
+scrcpy-board.exe selftest hover      # which phone is under a point, and hand-made drags
 scrcpy-board.exe selftest aspect     # pull a phone out of shape, then put it back
 scrcpy-board.exe selftest resizegroup # resize one of a pair, check the row follows
 ```

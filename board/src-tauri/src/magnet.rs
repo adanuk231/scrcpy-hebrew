@@ -320,7 +320,7 @@ pub fn resize_done(pedals: &HashMap<String, Pedal>, serial: &str, from: &win::Re
     }
 }
 
-/// Keep the floating strip over whichever phone has the keyboard.
+/// Keep the floating strip over whichever phone the icons are aimed at.
 ///
 /// The strip itself is marked never-activate, so clicking its icons does not
 /// take the focus off the phone and does not make the strip disappear from
@@ -329,8 +329,8 @@ pub fn resize_done(pedals: &HashMap<String, Pedal>, serial: &str, from: &win::Re
 /// Everything this needs is worked out under the lock and handed over; it must
 /// not hold the pedals itself, because tauri's window calls wait on the main
 /// thread and the main thread locks the pedals on every refresh.
-fn follow_focus(app: &tauri::AppHandle, on: Option<(String, win::Rect, bool)>,
-                aiming: &mut Option<String>, aimed_at: &mut Instant) {
+fn follow_aim(app: &tauri::AppHandle, on: Option<(String, win::Rect, bool)>,
+              aiming: &mut Option<String>, aimed_at: &mut Instant) {
     let aim_state = app.state::<std::sync::Mutex<crate::Aim>>();
     let (hwnd, (w, h)) = {
         let aim = aim_state.lock().unwrap();
@@ -347,10 +347,9 @@ fn follow_focus(app: &tauri::AppHandle, on: Option<(String, win::Rect, bool)>,
     let (target, rect, skin) = match on {
         Some(found) => found,
         None => {
-            // the strip never takes the focus itself, so anything that is not a
-            // phone means the user has gone elsewhere
-            // a moment's grace, so a wobble in the focus does not snatch the
-            // icons away from under the cursor on the way to clicking one
+            // nothing to sit on: a moment's grace first, so that leaving one
+            // phone on the way to another, or to the icons themselves, does
+            // not make them flicker
             if aiming.is_some() && aimed_at.elapsed() > Duration::from_millis(700) {
                 win::move_to(hwnd, -6000, -6000);
                 *aiming = None;
@@ -407,6 +406,15 @@ pub fn run(app: tauri::AppHandle, drags: std::sync::mpsc::Receiver<win::Drag>) {
             }
             was_visible = visible;
         }
+
+        // read before the pedals are locked: the strip's own handle lives
+        // beside the aim, and nothing may take that lock while holding this one
+        let (strip_hwnd, cursor) = {
+            let aim = app.state::<std::sync::Mutex<crate::Aim>>();
+            let hwnd = aim.lock().unwrap().hwnd;
+            (hwnd, win::cursor_pos())
+        };
+        let under = win::top_level_at(cursor.0, cursor.1);
 
         let board = app.state::<Board>();
         let mut pedals = board.pedals.lock().unwrap();
@@ -492,13 +500,26 @@ pub fn run(app: tauri::AppHandle, drags: std::sync::mpsc::Receiver<win::Drag>) {
             }
         }
 
+        // What the icons are for, in order: the phone being dragged, the one
+        // under the pointer, the one they are already on if the pointer has
+        // moved onto the icons themselves, and only then the one with the
+        // keyboard. Pointing is what makes them reachable at all - a phone you
+        // have not clicked on has no title bar either, and clicking it to
+        // bring up the icons would tap whatever is on the screen underneath.
         let aim = {
-            let fg = win::foreground();
-            pedals
-                .iter()
-                .find(|(_, p)| p.hwnd == fg)
-                .and_then(|(serial, p)| {
-                    rects.get(serial).map(|r| (serial.clone(), *r, p.skin))
+            let of = |hwnd: isize| {
+                pedals.iter().find(|(_, p)| p.hwnd == hwnd).map(|(s, _)| s.clone())
+            };
+            dragging
+                .clone()
+                .or_else(|| of(under))
+                .or_else(|| if under == strip_hwnd && under != 0 { aiming.clone() } else { None })
+                .or_else(|| of(win::foreground()))
+                .and_then(|serial| {
+                    match (rects.get(&serial), pedals.get(&serial)) {
+                        (Some(r), Some(p)) => Some((serial, *r, p.skin)),
+                        _ => None,
+                    }
                 })
         };
 
@@ -526,7 +547,7 @@ pub fn run(app: tauri::AppHandle, drags: std::sync::mpsc::Receiver<win::Drag>) {
         }
 
         drop(pedals);
-        follow_focus(&app, aim, &mut aiming, &mut aimed_at);
+        follow_aim(&app, aim, &mut aiming, &mut aimed_at);
     }
 }
 

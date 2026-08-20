@@ -31,6 +31,9 @@ extern "system" {
     fn SetForegroundWindow(hwnd: isize) -> i32;
     fn SetWindowTextW(hwnd: isize, text: *const u16) -> i32;
     fn PostMessageW(hwnd: isize, msg: u32, w: usize, l: isize) -> i32;
+    fn GetCursorPos(point: *mut Point) -> i32;
+    fn WindowFromPoint(point: Point) -> isize;
+    fn GetAncestor(hwnd: isize, flags: u32) -> isize;
 }
 
 #[link(name = "shell32")]
@@ -318,6 +321,25 @@ pub fn foreground() -> isize {
     unsafe { GetForegroundWindow() }
 }
 
+pub fn cursor_pos() -> (i32, i32) {
+    let mut p = Point { x: 0, y: 0 };
+    unsafe { GetCursorPos(&mut p) };
+    (p.x, p.y)
+}
+
+/// The top-level window under a screen point. WindowFromPoint answers with a
+/// child - the webview inside our own strip, or scrcpy's render surface - so
+/// it is walked up to whatever owns a place on the desktop.
+pub fn top_level_at(x: i32, y: i32) -> isize {
+    const GA_ROOT: u32 = 2;
+    let hit = unsafe { WindowFromPoint(Point { x, y }) };
+    if hit == 0 {
+        return 0;
+    }
+    let root = unsafe { GetAncestor(hit, GA_ROOT) };
+    if root == 0 { hit } else { root }
+}
+
 // -------------------------------------------------------------- moving -----
 
 pub fn move_to(hwnd: isize, x: i32, y: i32) {
@@ -381,16 +403,6 @@ pub fn never_activate(hwnd: isize) {
     unsafe {
         let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
         SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW);
-    }
-}
-
-/// Ask a window to start the move loop it would start from its own title bar,
-/// which is how a phone with no title bar is dragged by something else.
-pub fn begin_move(hwnd: isize) {
-    const WM_NCLBUTTONDOWN: u32 = 0x00A1;
-    const HTCAPTION: usize = 2;
-    unsafe {
-        PostMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
     }
 }
 
@@ -537,6 +549,19 @@ extern "system" fn drag_proc(_hook: isize, event: u32, hwnd: isize, id_object: i
         };
         if let Ok(tx) = tx.lock() {
             let _ = tx.send(message);
+        }
+    }
+}
+
+/// Say a drag started or ended that the shell knows nothing about, because we
+/// are the ones doing it. A phone with no title bar has nothing for Windows to
+/// start a move loop from, so the board moves it itself - and everything
+/// downstream (the group that travels with it, ctrl to peel one off, the snap
+/// when it lands) is the same code either way.
+pub fn post_drag(event: Drag) {
+    if let Some(tx) = DRAGS.get() {
+        if let Ok(tx) = tx.lock() {
+            let _ = tx.send(event);
         }
     }
 }
