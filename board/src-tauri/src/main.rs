@@ -10,6 +10,7 @@
 //! windows so two phones can be handled as one slab.
 
 mod magnet;
+mod places;
 mod startup;
 mod win;
 
@@ -206,12 +207,12 @@ fn scrcpy_args(serial: &str, title: &str, o: &Opts) -> Vec<String> {
         serial.into(),
         format!("--window-title={}", title),
         format!("--window-height={}", o.height.max(240)),
+        // no title bar on a phone, ever: the floating strip is its handle
+        "--window-borderless".into(),
         // born off-screen, so nothing flashes in the middle of the desktop
         "--window-x=-6000".into(),
         "--window-y=-6000".into(),
     ];
-    // no title bar on a phone, ever: the floating strip is its handle
-    a.push("--window-borderless".into());
     if o.keyboard == "uhid" {
         a.push("--keyboard=uhid".into());
     }
@@ -251,9 +252,10 @@ struct Started {
     args: Vec<String>,
 }
 
-/// Where a new phone should land: to the right of the phones already out, so
-/// starting two in a row gives you a magnetised pair without touching them.
-/// Visible coordinates, so "to the right of" means what it looks like.
+/// Where a phone the board has never seen should land: to the right of the
+/// phones already out, so starting two in a row gives you a magnetised pair
+/// without touching them. Visible coordinates, so "to the right of" means what
+/// it looks like.
 fn parking_spot(rects: &[win::Rect], w: i32, h: i32) -> (i32, i32) {
     let area = win::work_area();
     let mut x = area.left + 24;
@@ -267,6 +269,47 @@ fn parking_spot(rects: &[win::Rect], w: i32, h: i32) -> (i32, i32) {
         x = area.left + 24;
     }
     (x, y)
+}
+
+/// Where a phone should open, and how big.
+///
+/// Where you left it, if we have ever seen it. The screen it was on may have
+/// gone since, and something else may have been put in its place, so the
+/// remembered box is pulled back onto a monitor and then dropped the same way
+/// a dragged phone is dropped: pushed clear of anything it lands on, and
+/// clicked onto whatever it lands beside.
+fn opening_spot(serial: &str, opts: &Opts, aspect: f64, taken: &[win::Rect])
+                -> (i32, i32, i32, i32) {
+    // a phone window is all picture, so the height asked for is the height of
+    // the window, and the width follows from the shape
+    let asked = {
+        let h = (opts.height as i32).max(240);
+        (((h as f64) * aspect).round() as i32, h)
+    };
+    let spot = match places::of(serial) {
+        Some(spot) => spot,
+        None => {
+            let (x, y) = parking_spot(taken, asked.0, asked.1);
+            return (x, y, asked.0, asked.1);
+        }
+    };
+
+    // the size it was last dragged to, unless the height has been dialled to
+    // something else since, in which case that is the more recent instruction.
+    // Either way the shape is the picture's, so a phone that has been turned
+    // on its side is not squeezed back upright.
+    let (w, h) = if spot.asked == opts.height {
+        (spot.w, ((spot.w as f64) / aspect).round() as i32)
+    } else {
+        asked
+    };
+
+    let area = win::work_area_at(spot.x + spot.w / 2, spot.y + spot.h / 2);
+    let x = spot.x.max(area.left).min((area.right - w).max(area.left));
+    let y = spot.y.max(area.top).min((area.bottom - h).max(area.top));
+    let want = win::Rect { left: x, top: y, right: x + w, bottom: y + h };
+    let (dx, dy) = magnet::settle(&want, taken, &area);
+    (x + dx, y + dy, w, h)
 }
 
 #[tauri::command]
@@ -323,16 +366,19 @@ fn start_inner(board: &Board, serial: String, opts: Opts) -> Result<Started, Str
 
     // the unique title was only ever a handle; show the phone's name
     win::rename(hwnd, if opts.name.is_empty() { &serial } else { &opts.name });
-    // borderless costs the resize border too, and that is worth having back
-    win::resizable_edges(hwnd);
 
-    let size = win::visible_rect(hwnd).unwrap_or_default();
+    let opened = win::visible_rect(hwnd).unwrap_or_default();
     let taken: Vec<win::Rect> = {
         let pedals = board.pedals.lock().unwrap();
         pedals.values().filter_map(|p| win::visible_rect(p.hwnd)).collect()
     };
-    let (x, y) = parking_spot(&taken, size.w(), size.h());
-    win::move_visible_to(hwnd, x, y);
+    // the shape of the picture, not of the window it happens to have opened
+    // in: the window is about to be told what to be
+    let aspect = video_aspect(&serial)
+        .unwrap_or_else(|| opened.w().max(1) as f64 / opened.h().max(1) as f64);
+    let (x, y, w, h) = opening_spot(&serial, &opts, aspect, &taken);
+    win::place_visible(hwnd, x, y, w, h);
+    places::asked_for(&serial, opts.height);
     if opts.skin {
         win::round_corners(hwnd, 34);
     }
@@ -498,7 +544,7 @@ fn build_strip(app: &tauri::AppHandle) -> tauri::Result<()> {
     let strip = tauri::WebviewWindowBuilder::new(
         app, "strip", tauri::WebviewUrl::App("strip.html".into()))
         .title("board strip")
-        .inner_size(124.0, 30.0)
+        .inner_size(152.0, 30.0)
         .decorations(false)
         .transparent(true)
         .always_on_top(true)
@@ -566,6 +612,56 @@ fn strip_drag(app: tauri::AppHandle, state: State<Board>) {
     };
     let strip = app.state::<Mutex<Aim>>().lock().unwrap().hwnd;
     drag_by_hand(hwnd, strip);
+}
+
+/// Resize the phone the icons are sitting on.
+///
+/// Windows will not do this for us on a borderless window - see the note on
+/// the missing resize border in win.rs - so it is the same hand-driven loop as
+/// the drag, and it ends the same way: the magnet is told a drag finished, it
+/// sees the size changed rather than the position, and puts the shape and the
+/// rest of the group right.
+#[tauri::command]
+fn strip_resize(app: tauri::AppHandle, state: State<Board>) {
+    let serial = match aimed_at(&app) {
+        Some(serial) => serial,
+        None => return,
+    };
+    let hwnd = match state.pedals.lock().unwrap().get(&serial) {
+        Some(pedal) => pedal.hwnd,
+        None => return,
+    };
+    let aspect = video_aspect(&serial);
+    resize_by_hand(hwnd, aspect);
+}
+
+fn resize_by_hand(hwnd: isize, aspect: Option<f64>) {
+    if !win::mouse_down() || DRAG_BY_HAND.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    std::thread::spawn(move || {
+        if let Some(rect) = win::visible_rect(hwnd) {
+            let grab = win::cursor_pos();
+            let shape = aspect
+                .unwrap_or_else(|| rect.w().max(1) as f64 / rect.h().max(1) as f64);
+            win::post_drag(win::Drag::Started(hwnd));
+            std::thread::sleep(Duration::from_millis(45));
+            while win::mouse_down() {
+                let now = win::cursor_pos();
+                // a corner drag: the biggest picture of the right shape that
+                // fits inside the box you have pulled out
+                let (w, h) = magnet::fit_to_aspect(
+                    (rect.w() + now.0 - grab.0).max(80),
+                    (rect.h() + now.1 - grab.1).max(80),
+                    shape,
+                );
+                win::place_visible(hwnd, rect.left, rect.top, w, h);
+                std::thread::sleep(Duration::from_millis(8));
+            }
+            win::post_drag(win::Drag::Ended(hwnd));
+        }
+        DRAG_BY_HAND.store(false, Ordering::SeqCst);
+    });
 }
 
 static DRAG_BY_HAND: AtomicBool = AtomicBool::new(false);
@@ -694,6 +790,8 @@ fn start_daemon() {
 ///   selftest keep       every phone, left running
 ///   selftest readopt    pick up phones left running, then close them
 ///   selftest hover      which phone is under a point, and hand-made drags
+///   selftest remember   a phone opens where it was last left
+///   selftest lineup     lining a row up leaves it where it stands
 fn test_opts(name: &str, keyboard: &str) -> Opts {
     Opts {
         audio: "off".into(),
@@ -758,19 +856,22 @@ fn selftest(what: String) -> i32 {
         println!("scrcpy says the picture is {:?} wide per tall", aspect);
 
         let before = win::visible_rect(hwnd).unwrap_or_default();
-        let (cw, ch) = win::client_size(hwnd).unwrap_or((0, 0));
-        println!("as opened: {}x{} of picture, {:.4} shape", cw, ch, cw as f64 / ch as f64);
+        let seen = |label: &str| {
+            let r = win::visible_rect(hwnd).unwrap_or_default();
+            println!("{:<12} {}x{} on screen, {:.4} shape",
+                     label, r.w(), r.h(), r.w() as f64 / r.h().max(1) as f64);
+            r
+        };
+        seen("as opened:");
 
         // drag the right edge far out, which is what makes the black bars
         win::place_visible(hwnd, before.left, before.top, before.w() + 260, before.h());
-        let (cw, ch) = win::client_size(hwnd).unwrap_or((0, 0));
-        println!("pulled out:  {}x{} of picture, {:.4} shape", cw, ch, cw as f64 / ch as f64);
+        seen("pulled out:");
 
         let group = std::collections::HashSet::new();
         magnet::resize_done(&board.pedals.lock().unwrap(), &serial, &before, &group, true);
-        let (cw, ch) = win::client_size(hwnd).unwrap_or((0, 0));
-        let shape = cw as f64 / ch.max(1) as f64;
-        println!("put back:    {}x{} of picture, {:.4} shape", cw, ch, shape);
+        let put = seen("put back:");
+        let shape = put.w() as f64 / put.h().max(1) as f64;
 
         let wanted = aspect.unwrap_or(shape);
         let off = (shape - wanted).abs();
@@ -896,6 +997,98 @@ fn selftest(what: String) -> i32 {
         stop_inner(&board, &serial);
         let ok = under == hwnd && outside != hwnd && heard.len() == 2;
         return if ok { 0 } else { 1 };
+    }
+
+    if what == "remember" {
+        // put a phone somewhere odd, write that down the way the magnet loop
+        // does, and check it opens there again rather than in the corner
+        let list = devices();
+        if list.is_empty() {
+            println!("no phones");
+            return 1;
+        }
+        let (serial, name, keyboard) = list[0].clone();
+        if let Err(e) = start_inner(&board, serial.clone(), test_opts(&name, &keyboard)) {
+            println!("{} FAILED: {}", name, e);
+            return 1;
+        }
+        let hwnd = board.pedals.lock().unwrap()[&serial].hwnd;
+        let area = win::work_area();
+        let opened = win::visible_rect(hwnd).unwrap_or_default();
+        let want = win::Rect {
+            left: area.left + 520,
+            top: area.top + 180,
+            right: area.left + 520 + opened.w() - 60,
+            bottom: area.top + 180 + opened.h() - 132,
+        };
+        win::place_visible(hwnd, want.left, want.top, want.w(), want.h());
+        let put = win::visible_rect(hwnd).unwrap_or_default();
+        println!("put at       {},{} {}x{}", put.left, put.top, put.w(), put.h());
+        let mut seen = std::collections::HashMap::new();
+        seen.insert(serial.clone(), put);
+        places::keep(&seen);
+        stop_inner(&board, &serial);
+
+        if let Err(e) = start_inner(&board, serial.clone(), test_opts(&name, &keyboard)) {
+            println!("{} FAILED on the second start: {}", name, e);
+            return 1;
+        }
+        let hwnd = board.pedals.lock().unwrap()[&serial].hwnd;
+        let back = win::visible_rect(hwnd).unwrap_or_default();
+        println!("opened at    {},{} {}x{}", back.left, back.top, back.w(), back.h());
+        stop_inner(&board, &serial);
+        let near = |a: i32, b: i32| (a - b).abs() <= 3;
+        let ok = near(back.left, put.left) && near(back.top, put.top) && near(back.w(), put.w());
+        println!("back where it was: {}", ok);
+        return if ok { 0 } else { 1 };
+    }
+
+    if what == "lineup" {
+        // two phones dumped in the middle of the screen: lining them up should
+        // tidy the row where it stands, not carry it off to the corner
+        let list = devices();
+        if list.len() < 2 {
+            println!("needs two phones");
+            return 1;
+        }
+        for (serial, name, keyboard) in &list {
+            if let Err(e) = start_inner(&board, serial.clone(), test_opts(name, keyboard)) {
+                println!("{} FAILED: {}", name, e);
+                return 1;
+            }
+        }
+        let order: Vec<String> = list.iter().map(|(s, _, _)| s.clone()).collect();
+        let pedals = board.pedals.lock().unwrap();
+        let corner = (700, 380);
+        for (i, serial) in order.iter().enumerate() {
+            if let Some(p) = pedals.get(serial) {
+                if let Some(r) = win::visible_rect(p.hwnd) {
+                    // scattered, and deliberately not in reading order
+                    win::move_visible_to(p.hwnd, corner.0 + (i as i32) * 90,
+                                         corner.1 + (1 - i as i32) * 60);
+                    let _ = r;
+                }
+            }
+        }
+        magnet::arrange(&pedals, &order);
+        let after: Vec<win::Rect> = order
+            .iter()
+            .filter_map(|s| pedals.get(s).and_then(|p| win::visible_rect(p.hwnd)))
+            .collect();
+        for r in &after {
+            println!("  {},{} {}x{}", r.left, r.top, r.w(), r.h());
+        }
+        let flush = after.windows(2).all(|w| (w[0].right - w[1].left).abs() <= 2);
+        let level = after.windows(2).all(|w| w[0].top == w[1].top);
+        let stayed = after[0].left >= corner.0 - 8 && after[0].top >= corner.1 - 8;
+        println!("flush:  {}", flush);
+        println!("level:  {}", level);
+        println!("stayed where they were: {}", stayed);
+        drop(pedals);
+        for (serial, _, _) in &list {
+            stop_inner(&board, serial);
+        }
+        return if flush && level && stayed { 0 } else { 1 };
     }
 
     if what == "autostart" {
@@ -1259,7 +1452,7 @@ fn main() {
             probe, start, stop, running, set_skin, arrange,
             focus_device, action, rotate, status, open_logs,
             autostart_state, set_autostart, hide_board, settled,
-            strip_drag, strip_skin, strip_stop, strip_pick
+            strip_drag, strip_resize, strip_skin, strip_stop, strip_pick
         ])
         .run(tauri::generate_context!())
         .expect("board failed to start");

@@ -272,22 +272,16 @@ pub fn move_visible_to(hwnd: isize, x: i32, y: i32) {
     move_to(hwnd, x - (inner.left - outer.left), y - (inner.top - outer.top));
 }
 
-/// The picture itself, without frame or title bar.
-pub fn client_size(hwnd: isize) -> Option<(i32, i32)> {
-    let mut r = Rect::default();
-    if unsafe { GetClientRect(hwnd, &mut r) } == 0 || r.w() <= 0 || r.h() <= 0 {
-        return None;
-    }
-    Some((r.w(), r.h()))
-}
-
-/// How much bigger the window looks than the picture inside it.
-pub fn frame_extra(hwnd: isize) -> (i32, i32) {
-    match (visible_rect(hwnd), client_size(hwnd)) {
-        (Some(v), Some((cw, ch))) => (v.w() - cw, v.h() - ch),
-        _ => (0, 0),
-    }
-}
+// GetClientRect is not the truth about a phone window, and neither is any
+// sum built on it.
+//
+// SDL answers `WM_NCCALCSIZE` for its borderless windows, so the client
+// rectangle it reports is the size SDL believes in rather than the size on
+// screen: a window measured at 261x573 by both Windows and DWM still called
+// its client area 318x700, the size it was born at, and went on saying so
+// after being resized again. A phone window is all picture anyway - no title
+// bar, no frame - so everything here is measured from what DWM says is on
+// screen, and the picture and the window are the same rectangle.
 
 /// Move and size in visible coordinates, border allowed for.
 pub fn place_visible(hwnd: isize, x: i32, y: i32, w: i32, h: i32) {
@@ -377,23 +371,20 @@ pub fn square_corners(hwnd: isize) {
     unsafe { SetWindowRgn(hwnd, 0, 1) };
 }
 
-/// Give a window back its (invisible) resize border.
-///
-/// `--window-borderless` takes WS_THICKFRAME off along with the title bar, and
-/// without it the window cannot be resized at all - no edges, no corners. Put
-/// it back and Windows gives you the seven-pixel grab margin again while
-/// drawing nothing, since there is no caption to draw a frame around.
-pub fn resizable_edges(hwnd: isize) {
-    unsafe {
-        let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
-        if style & WS_THICKFRAME == 0 {
-            SetWindowLongPtrW(hwnd, GWL_STYLE, style | WS_THICKFRAME);
-            SetWindowPos(hwnd, 0, 0, 0, 0, 0,
-                         SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER
-                             | SWP_NOACTIVATE);
-        }
-    }
-}
+// A phone has no resize border, and must not be given one.
+//
+// The obvious move on a borderless window is to put `WS_THICKFRAME` back: the
+// cursors return and nothing is drawn, since there is no caption to frame.
+// What it actually does is freeze the window. The min and max track sizes from
+// `WM_GETMINMAXINFO` are only enforced on a window that has a sizing border,
+// and SDL answers that message with the size it thinks the window should be -
+// the same number twice, because as far as SDL is concerned this window was
+// never resizable. Add the border and every resize, ours included, is clamped
+// straight back. Measured: with it on, a window asked for 300x660 came back
+// 273x600, its size at birth; with it off again the same call took.
+//
+// So the phone keeps no frame at all and the board resizes it by hand, from
+// the strip, the same way it moves it.
 
 /// Clicks on this window must not take the keyboard away from the phone it is
 /// floating over.
@@ -406,20 +397,6 @@ pub fn never_activate(hwnd: isize) {
     }
 }
 
-/// Strip the frame off a window we did not start borderless.
-pub fn chromeless(hwnd: isize, on: bool) {
-    unsafe {
-        let mut style = GetWindowLongPtrW(hwnd, GWL_STYLE);
-        if on {
-            style &= !(WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX);
-        } else {
-            style |= WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
-        }
-        SetWindowLongPtrW(hwnd, GWL_STYLE, style);
-        SetWindowPos(hwnd, 0, 0, 0, 0, 0,
-                     SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
-    }
-}
 
 // ------------------------------------------------------------ keyboard -----
 

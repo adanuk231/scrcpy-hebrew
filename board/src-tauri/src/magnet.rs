@@ -170,7 +170,7 @@ fn snap_offset(moving: &win::Rect, others: &[win::Rect], area: &win::Rect) -> (i
 
 /// Where a dropped phone belongs: out of everyone's way first, then clicked
 /// onto whatever it landed beside.
-fn settle(moving: &win::Rect, others: &[win::Rect], area: &win::Rect) -> (i32, i32) {
+pub fn settle(moving: &win::Rect, others: &[win::Rect], area: &win::Rect) -> (i32, i32) {
     let (mut dx, mut dy) = separate(moving, others);
     let (sx, sy) = snap_offset(&shifted(moving, dx, dy), others, area);
     dx += sx;
@@ -188,18 +188,32 @@ pub fn geometry(pedals: &HashMap<String, Pedal>) -> HashMap<String, win::Rect> {
         .collect()
 }
 
-/// Line them up in the given order, flush, starting at the top left.
+/// Line them up in the given order, flush, where they already are.
+///
+/// Tidying a row up should not also mean moving it across the desktop, so the
+/// row forms at the top left corner of the ground the phones already cover,
+/// pulled back onto the screen if the row is now too wide to start there.
 pub fn arrange(pedals: &HashMap<String, Pedal>, order: &[String]) {
-    let area = win::work_area();
-    let mut x = area.left + 24;
-    let y = area.top + 24;
-    for serial in order {
-        if let Some(pedal) = pedals.get(serial) {
-            if let Some(r) = win::visible_rect(pedal.hwnd) {
-                win::move_visible_to(pedal.hwnd, x, y);
-                x += r.w();
-            }
-        }
+    let out: Vec<(isize, win::Rect)> = order
+        .iter()
+        .filter_map(|serial| pedals.get(serial))
+        .filter_map(|p| win::visible_rect(p.hwnd).map(|r| (p.hwnd, r)))
+        .collect();
+    if out.is_empty() {
+        return;
+    }
+    let corner = (
+        out.iter().map(|(_, r)| r.left).min().unwrap_or(0),
+        out.iter().map(|(_, r)| r.top).min().unwrap_or(0),
+    );
+    let width: i32 = out.iter().map(|(_, r)| r.w()).sum();
+    let tallest = out.iter().map(|(_, r)| r.h()).max().unwrap_or(0);
+    let area = win::work_area_at(corner.0 + width.min(400) / 2, corner.1);
+    let mut x = corner.0.max(area.left).min((area.right - width).max(area.left));
+    let y = corner.1.max(area.top).min((area.bottom - tallest).max(area.top));
+    for (hwnd, r) in &out {
+        win::move_visible_to(*hwnd, x, y);
+        x += r.w();
     }
 }
 
@@ -208,7 +222,7 @@ pub fn arrange(pedals: &HashMap<String, Pedal>, order: &[String]) {
 /// The picture has a fixed shape, so a window of any other shape is padding.
 /// Fitting inside rather than around means the window only ever ends up
 /// smaller than you dragged it, never surprising you by growing.
-fn fit_to_aspect(w: i32, h: i32, aspect: f64) -> (i32, i32) {
+pub fn fit_to_aspect(w: i32, h: i32, aspect: f64) -> (i32, i32) {
     let by_width = ((h as f64) * aspect).round() as i32;
     if by_width <= w {
         (by_width.max(80), h.max(80))
@@ -224,19 +238,17 @@ fn fit_to_aspect(w: i32, h: i32, aspect: f64) -> (i32, i32) {
 /// follows. Drag the bottom down and the window gets taller *and* wider;
 /// only a corner, where you moved both, is fitted inside what you drew.
 fn resize_one(hwnd: isize, aspect: f64, want: &win::Rect, from: &win::Rect) -> win::Rect {
-    let (extra_w, extra_h) = win::frame_extra(hwnd);
-    let want_w = (want.w() - extra_w).max(80);
-    let want_h = (want.h() - extra_h).max(80);
+    let want_w = want.w().max(80);
+    let want_h = want.h().max(80);
     let moved_w = want.w() != from.w();
     let moved_h = want.h() != from.h();
-    let (cw, ch) = if moved_w && !moved_h {
+    let (w, h) = if moved_w && !moved_h {
         (want_w, ((want_w as f64) / aspect).round().max(80.0) as i32)
     } else if moved_h && !moved_w {
         (((want_h as f64) * aspect).round().max(80.0) as i32, want_h)
     } else {
         fit_to_aspect(want_w, want_h, aspect)
     };
-    let (w, h) = (cw + extra_w, ch + extra_h);
     // the edge that moved is the one under the cursor, so hold the other one
     let x = if want.left != from.left { want.right - w } else { want.left };
     let y = if want.top != from.top { want.bottom - h } else { want.top };
@@ -300,22 +312,20 @@ pub fn resize_done(pedals: &HashMap<String, Pedal>, serial: &str, from: &win::Re
         let left = line.iter().map(|(_, _, r)| r.left).min().unwrap_or(settled.left);
         let mut x = left;
         for (hwnd, a, _) in &line {
-            let (extra_w, extra_h) = win::frame_extra(*hwnd);
-            let ch = settled.h() - extra_h;
-            let cw = ((ch as f64) * a).round() as i32;
-            win::place_visible(*hwnd, x, settled.top, cw + extra_w, ch + extra_h);
-            x += cw + extra_w;
+            let h = settled.h();
+            let w = ((h as f64) * a).round() as i32;
+            win::place_visible(*hwnd, x, settled.top, w, h);
+            x += w;
         }
     } else {
         line.sort_by_key(|(_, _, r)| r.top);
         let top = line.iter().map(|(_, _, r)| r.top).min().unwrap_or(settled.top);
         let mut y = top;
         for (hwnd, a, _) in &line {
-            let (extra_w, extra_h) = win::frame_extra(*hwnd);
-            let cw = settled.w() - extra_w;
-            let ch = ((cw as f64) / a).round() as i32;
-            win::place_visible(*hwnd, settled.left, y, cw + extra_w, ch + extra_h);
-            y += ch + extra_h;
+            let w = settled.w();
+            let h = ((w as f64) / a).round() as i32;
+            win::place_visible(*hwnd, settled.left, y, w, h);
+            y += h;
         }
     }
 }
@@ -391,6 +401,9 @@ pub fn run(app: tauri::AppHandle, drags: std::sync::mpsc::Receiver<win::Drag>) {
     let mut grabbed: Option<win::Rect> = None;
     let mut aiming: Option<String> = None;
     let mut aimed_at = Instant::now();
+    let mut last: HashMap<String, win::Rect> = HashMap::new();
+    let mut still_since = Instant::now();
+    let mut unsaved = false;
 
     loop {
         std::thread::sleep(TICK);
@@ -544,6 +557,21 @@ pub fn run(app: tauri::AppHandle, drags: std::sync::mpsc::Receiver<win::Drag>) {
                     anchor = (now.left, now.top);
                 }
             }
+        }
+
+        // where everything ended up, written down once it has stopped moving:
+        // this is the one place that sees every way a phone can be moved, by
+        // hand or by lining them up, and it survives the board being killed
+        if rects != last {
+            last = rects.clone();
+            still_since = Instant::now();
+            unsaved = true;
+        } else if unsaved
+            && dragging.is_none()
+            && still_since.elapsed() > Duration::from_millis(500)
+        {
+            crate::places::keep(&rects);
+            unsaved = false;
         }
 
         drop(pedals);

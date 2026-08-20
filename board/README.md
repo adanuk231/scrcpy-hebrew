@@ -89,12 +89,10 @@ webview hanging over every phone is a lot of machinery for a row of four icons.
 It sits just above the phone, or just inside the top if the phone is against
 the top of the screen.
 
-Two things this needed. `--window-borderless` takes `WS_THICKFRAME` off along
-with the title bar, and without it a window cannot be resized at all, so it is
-put back: Windows then gives the invisible grab margin without drawing
-anything, since there is no caption to draw a frame around.
+The icons are five: drag, rounded corners, drag to resize, show this phone on
+the board, stop.
 
-And **the board moves the phone itself**. The tidy way is to ask the window to
+**The board moves and resizes the phone itself.** The tidy way is to ask the window to
 start the move loop it would start from its own title bar - `WM_NCLBUTTONDOWN`
 with `HTCAPTION` - but that does not survive being asked from another process:
 the loop wants the mouse capture, and whether it gets it depends on who is in
@@ -103,6 +101,25 @@ held down. It worked once and then never again. So a thread follows the cursor
 while the button is down, moves the window, and posts the same two events the
 shell would have posted - which leaves the group travelling, ctrl peeling one
 off and the snap on landing all working off the one path they already used.
+
+Resizing goes the same way, and has to. The tempting move on a borderless
+window is to put `WS_THICKFRAME` back - the resize cursors return and nothing
+is drawn, since there is no caption to frame. What it actually does is freeze
+the window. The min and max track sizes from `WM_GETMINMAXINFO` are only
+enforced on a window that has a sizing border, and SDL answers that message
+with the size it thinks the window should be, twice, because as far as SDL is
+concerned a borderless window was never resizable. Measured: with the border
+on, a window asked for 300x660 came back 273x600, its size at birth; with it
+off again the same call took. So the phone keeps no frame at all, and the
+resize icon drags a corner by hand.
+
+One more thing that is not what it looks like: `GetClientRect` does not
+describe a phone window. SDL answers `WM_NCCALCSIZE` for its borderless
+windows, so the client rectangle it reports is the size SDL believes in rather
+than the size on screen - a window measured at 261x573 by both Windows and DWM
+went on calling its client area 318x700, the size it was born at. A phone
+window is all picture anyway, so every measurement here comes from what DWM
+says is on screen.
 
 ## Magnet
 
@@ -135,8 +152,27 @@ that has been pulled out of shape has black bars in it, and measuring that
 would just preserve them. scrcpy prints `Texture: 1080x2280`, and prints it
 again when the phone rotates.
 
-`line them up` puts every running phone in a row, in tab order; dragging a tab
-sideways reorders and re-lays them out.
+### Where a phone opens
+
+Where you left it. Position and size are written down per serial as soon as a
+phone stops moving, from the same loop that runs the magnet - so it covers
+dragging, resizing, lining up, and the board being killed outright. Next time
+it opens there.
+
+The remembered box is checked before it is used: pulled back onto a monitor
+that still exists, then dropped the way a dragged phone is dropped, so it never
+lands on top of a phone that is already out. A phone the board has never seen
+still parks to the right of whatever is there.
+
+The size is the one you dragged it to, unless the height in settings has been
+changed since - that is the more recent instruction, so it wins. The shape is
+always the picture's, so a phone that has been turned on its side is not
+squeezed back upright.
+
+`line them up` puts every running phone in a row, in tab order, **where they
+already are**: the row forms at the top left corner of the ground they already
+cover, so tidying a row does not also carry it off to the corner of the screen.
+Dragging a tab sideways reorders and re-lays them out.
 
 Two things make this work that are worth writing down. A drag announces itself
 - either the shell says so (`EVENT_SYSTEM_MOVESIZESTART`, for a resize, which
@@ -220,6 +256,8 @@ scrcpy-board.exe selftest readopt    # pick up phones left running, then close
 scrcpy-board.exe selftest autostart  # the Run key round-trips and restores
 scrcpy-board.exe selftest drags      # what the shell reports while you drag a phone
 scrcpy-board.exe selftest hover      # which phone is under a point, and hand-made drags
+scrcpy-board.exe selftest remember   # a phone opens where it was last left
+scrcpy-board.exe selftest lineup     # lining a row up leaves it where it stands
 scrcpy-board.exe selftest aspect     # pull a phone out of shape, then put it back
 scrcpy-board.exe selftest resizegroup # resize one of a pair, check the row follows
 ```
