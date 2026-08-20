@@ -883,7 +883,9 @@ class Overlay:
         if daemon.status and (time.time() - daemon.status_at) > 2.5:
             daemon.status = ""
 
-        if not (hwnd and (text or daemon.status or (tag and mode == "paste"))):
+        # the language is worth a word when it changes, not a badge that sits
+        # under the phone for the whole session
+        if not (hwnd and (text or daemon.status)):
             if self.visible:
                 self.root.withdraw()
                 self.visible = False
@@ -928,7 +930,8 @@ def run_daemon():
     overlay = Overlay(root)
     # the launcher starts us *before* scrcpy, and scrcpy needs a moment to push
     # its server and open a window - so never quit until we have seen one
-    state = {"gone_since": 0.0, "seen": False, "started": time.time()}
+    state = {"gone_since": 0.0, "seen": False, "started": time.time(),
+             "hwnd": None, "tag": None}
 
     def tick():
         daemon.idle_tick()
@@ -937,6 +940,11 @@ def run_daemon():
         hwnd, serial, mode, tag = daemon.foreground()
         if hwnd and serial and mode == "uhid":
             daemon.request_sync(serial, tag, hwnd)
+        # say which language you just switched to, but only for the window you
+        # are already in - moving between windows is not a language change
+        if hwnd and state["hwnd"] == hwnd and tag != state["tag"]:
+            daemon.note((tag or "en").upper())
+        state["hwnd"], state["tag"] = hwnd, tag
         try:
             overlay.update()
         except Exception as exc:

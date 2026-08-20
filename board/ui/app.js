@@ -10,7 +10,7 @@ const LogicalSize = window.__TAURI__.window.LogicalSize;
 const deck = document.getElementById("deck");
 const settings = document.getElementById("settings");
 const tabsEl = document.getElementById("tabs");
-const whyEl = document.getElementById("why");
+const noteEl = document.getElementById("note");
 const powerEl = document.getElementById("power");
 const nameEl = deck.querySelector(".name");
 const badgesEl = deck.querySelector(".badges");
@@ -74,21 +74,20 @@ function optionsFor(serial) {
   return value;
 }
 
-function say(text, tone) {
-  whyEl.textContent = text || "";
-  whyEl.classList.toggle("quiet", tone === "quiet");
-  fit();
-}
+/** A line in the header, whose height never changes, so nothing below it
+    moves when the board has something to say. */
+let noteTimer = null;
 
-/** Hold a message on screen for a moment instead of letting a repaint eat it. */
-function hold(text, tone, ms) {
-  say(text, tone);
-  whyEl.dataset.sticky = "1";
-  if (ms) {
-    setTimeout(() => {
-      delete whyEl.dataset.sticky;
-      paint();
-    }, ms);
+function say(text, kind, ms) {
+  clearTimeout(noteTimer);
+  noteEl.textContent = text || "";
+  noteEl.title = text || "";
+  noteEl.classList.toggle("warn", kind === "warn");
+  if (text) {
+    noteTimer = setTimeout(() => {
+      noteEl.textContent = "";
+      noteEl.title = "";
+    }, ms || (kind === "warn" ? 9000 : 3500));
   }
 }
 
@@ -111,16 +110,15 @@ function blocked(cap, key, value) {
   return "";
 }
 
-/** Something worth knowing about this phone even when nothing is blocked. */
-function footnote(cap, o) {
-  if (o.audio === "output" && cap.audio === "output") {
-    return `Audio arrives here through REMOTE_SUBMIX, so ${cap.name} itself goes quiet while it plays.`;
+/** What a control is worth knowing about on this phone, for its tooltip. */
+function tooltip(cap, key, value) {
+  const no = blocked(cap, key, value);
+  if (no) return no;
+  if (key === "audio" && value === "output") {
+    return `Sends the sound here through REMOTE_SUBMIX, which takes it off ${cap.name} itself.`;
   }
-  if (o.view_only) {
-    return "Look only: the mirror passes no clicks or typing. The buttons below still work.";
-  }
-  if (cap.keyboard === "paste") {
-    return `${cap.name} has no hardware keyboard layout, so Hebrew goes through the clipboard rather than uhid.`;
+  if (key === "audio" && value === "dup") {
+    return "Captures playback and keeps the phone audible. Apps are allowed to opt out of being captured.";
   }
   return "";
 }
@@ -136,7 +134,6 @@ function paint() {
     nameEl.textContent = caps.size ? "pick a phone" : "no phones on adb";
     badgesEl.innerHTML = "";
     powerEl.disabled = true;
-    if (!whyEl.dataset.sticky) say("");
     paintTabs();
     return;
   }
@@ -154,6 +151,9 @@ function paint() {
   };
   add(`A${cap.release}`);
   add(cap.keyboard, cap.keyboard === "uhid" ? "uhid" : "");
+  badgesEl.lastChild.title = cap.keyboard === "uhid"
+    ? `${cap.name} maps the keys itself, so Hebrew types straight through.`
+    : `${cap.name} has no hardware keyboard layout, so Hebrew goes by clipboard.`;
   if (typeof cap.battery === "number" && cap.battery >= 0) {
     add(`${cap.battery}%`, cap.battery <= 20 ? "low" : "");
   }
@@ -164,7 +164,15 @@ function paint() {
     for (const button of seg.querySelectorAll("button")) {
       const value = key === "audio" ? button.dataset.value : Number(button.dataset.value);
       button.classList.toggle("on", o[key] === value);
-      button.classList.toggle("blocked", !!blocked(cap, key, button.dataset.value));
+      // a phone that cannot do this gets a grey button and the reason on
+      // hover, rather than a line of text that shifts everything below it
+      button.disabled = !!blocked(cap, key, button.dataset.value);
+      const why = tooltip(cap, key, button.dataset.value);
+      if (why) {
+        button.title = why;
+      } else {
+        button.removeAttribute("title");
+      }
       button.setAttribute("aria-label", `${key} ${button.textContent.trim()} ${cap.name}`);
     }
   }
@@ -176,7 +184,6 @@ function paint() {
     pad.setAttribute("aria-label", `${pad.dataset.act} ${cap.name}`);
   }
 
-  if (!whyEl.dataset.sticky) say(footnote(cap, o), "quiet");
   paintTabs();
   fit();
 }
@@ -205,7 +212,6 @@ function paintTabs() {
 
 function select(serial) {
   selected = serial;
-  delete whyEl.dataset.sticky;
   showPage("deck");
   paint();
   save();
@@ -245,14 +251,14 @@ function showPage(page) {
 // ------------------------------------------------------------- actions ---
 
 async function start(serial) {
-  hold("connecting...", "quiet");
+  say("connecting...");
   try {
     await invoke("start", { serial, opts: optionsFor(serial) });
     live.add(serial);
-    delete whyEl.dataset.sticky;
+    say("");
   } catch (err) {
     live.delete(serial);
-    hold(String(err));
+    say(String(err), "warn");
   }
   paint();
 }
@@ -260,13 +266,12 @@ async function start(serial) {
 async function stop(serial) {
   await invoke("stop", { serial });
   live.delete(serial);
-  delete whyEl.dataset.sticky;
   paint();
 }
 
 async function reconnect(serial, what) {
   if (!live.has(serial)) return;
-  hold(`${what} needs a reconnect...`, "quiet");
+  say(`${what} needs a reconnect...`);
   await start(serial);
 }
 
@@ -279,16 +284,10 @@ for (const seg of deck.querySelectorAll(".seg")) {
   seg.addEventListener("click", (e) => {
     const button = e.target.closest("button");
     if (!button || !selected) return;
+    if (button.disabled) return;
     const key = seg.dataset.key;
-    const no = blocked(caps.get(selected), key, button.dataset.value);
-    if (no) {
-      // not a failure, just not something this phone can do
-      hold(no, "", 6000);
-      return;
-    }
     const o = optionsFor(selected);
     o[key] = key === "audio" ? button.dataset.value : Number(button.dataset.value);
-    delete whyEl.dataset.sticky;
     save();
     paint();
     reconnect(selected, key);
@@ -301,12 +300,12 @@ for (const flag of deck.querySelectorAll(".flag")) {
     const o = optionsFor(selected);
     const key = flag.dataset.flag;
     o[key] = !o[key];
-    delete whyEl.dataset.sticky;
     save();
     paint();
     if (key === "skin" && live.has(selected)) {
       // the one thing that can be changed on a window already open
-      invoke("set_skin", { serial: selected, on: o.skin }).catch((err) => hold(String(err)));
+      invoke("set_skin", { serial: selected, on: o.skin })
+        .catch((err) => say(String(err), "warn"));
       return;
     }
     reconnect(selected, key);
@@ -318,8 +317,8 @@ deck.querySelector(".pads").addEventListener("click", (e) => {
   if (!button || !selected) return;
   const name = caps.get(selected).name;
   invoke("action", { serial: selected, what: button.dataset.act })
-    .then(() => hold(`${button.dataset.act} sent to ${name}`, "quiet", 1600))
-    .catch((err) => hold(String(err), "", 5000));
+    .then(() => say(`${button.dataset.act} sent to ${name}`, "", 1600))
+    .catch((err) => say(String(err), "warn"));
 });
 
 // ------------------------------------------------------ tabs and header --
@@ -390,7 +389,7 @@ loginBox.addEventListener("change", async () => {
     loginBox.checked = await invoke("set_autostart", { on: loginBox.checked });
   } catch (err) {
     loginBox.checked = false;
-    hold(String(err));
+    say(String(err), "warn");
   }
 });
 
@@ -447,7 +446,7 @@ async function refresh() {
         .catch(() => {});
     }
   } catch (err) {
-    hold(String(err));
+    say(String(err), "warn");
   }
 }
 
@@ -460,7 +459,7 @@ listen("pedals-changed", (event) => {
 
 listen("detached", (event) => {
   const cap = caps.get(event.payload);
-  if (cap) hold(`${cap.name} taken out of its group`, "quiet", 1800);
+  if (cap) say(`${cap.name} taken out of its group`, "", 2200);
 });
 
 listen("autostart-changed", (e) => { loginBox.checked = !!e.payload; });

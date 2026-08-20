@@ -20,7 +20,7 @@
         "skipTaskbar": true,
         "visible": true,
         "theme": "Dark",
-        "shadow": true
+        "shadow": false
       }
     ],
     "security": {
