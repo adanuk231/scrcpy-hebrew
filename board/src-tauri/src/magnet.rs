@@ -2,8 +2,8 @@
 //!
 //! Phones never sit on top of each other: one dropped over another is pushed
 //! out to whichever side is nearest and left flush against it. Whatever is
-//! stuck to a phone travels with it - unless you throw it, which is how you
-//! pull one back out of a row.
+//! stuck to a phone travels with it - unless you hold ctrl, which takes the
+//! one you are dragging out of its group and leaves the rest where they are.
 //!
 //! All of this works in *visible* coordinates. `GetWindowRect` reports the
 //! extended bounds, which on Windows 10 include an invisible resize border of
@@ -26,10 +26,6 @@ const SNAP: i32 = 26;
 const TOUCHING: i32 = 8;
 /// how far a window will travel to line up with one it has just joined
 const ALIGN: i32 = 90;
-/// pixels inside one tick that read as a throw rather than a drag
-const FLICK: i32 = 70;
-/// and enough of a throw to let go of the group on its own
-const FLING: i32 = 130;
 const TICK: Duration = Duration::from_millis(30);
 
 fn spans(a1: i32, a2: i32, b1: i32, b2: i32) -> bool {
@@ -213,10 +209,24 @@ pub fn run(app: tauri::AppHandle, drags: std::sync::mpsc::Receiver<win::Drag>) {
     let mut dragging: Option<String> = None;
     let mut group: HashSet<String> = HashSet::new();
     let mut anchor = (0, 0);
-    let mut hot = 0u8;
+    let mut solo = false;
+    let mut was_visible = true;
 
     loop {
         std::thread::sleep(TICK);
+
+        // put away and brought back means back to its corner by the tray,
+        // however it was brought back - the icon, the menu, or running the exe
+        // again. Moving it by hand is what makes it stay where it is put, and
+        // that only lasts as long as it is on screen.
+        if let Some(window) = app.get_webview_window("main") {
+            let visible = window.is_visible().unwrap_or(false);
+            if visible && !was_visible {
+                crate::park_over_tray(&app);
+            }
+            was_visible = visible;
+        }
+
         let board = app.state::<Board>();
         let mut pedals = board.pedals.lock().unwrap();
 
@@ -244,10 +254,17 @@ pub fn run(app: tauri::AppHandle, drags: std::sync::mpsc::Receiver<win::Drag>) {
                 win::Drag::Started(hwnd) => {
                     let ours = pedals.iter().find(|(_, p)| p.hwnd == hwnd).map(|(s, _)| s.clone());
                     if let Some(serial) = ours {
-                        group = cluster(&serial, &rects);
-                        group.remove(&serial);
+                        // ctrl at the moment of grabbing means take this one
+                        // out on its own and leave the row alone
+                        solo = win::ctrl_down();
+                        group = if solo {
+                            HashSet::new()
+                        } else {
+                            let mut c = cluster(&serial, &rects);
+                            c.remove(&serial);
+                            c
+                        };
                         anchor = rects.get(&serial).map(|r| (r.left, r.top)).unwrap_or((0, 0));
-                        hot = 0;
                         dragging = Some(serial);
                     }
                 }
@@ -273,29 +290,25 @@ pub fn run(app: tauri::AppHandle, drags: std::sync::mpsc::Receiver<win::Drag>) {
                         }
                         dragging = None;
                         group.clear();
+                        solo = false;
                     }
                 }
             }
         }
 
         if let Some(serial) = dragging.clone() {
+            // ctrl part way through a drag counts too, so you can start
+            // moving a pair and then decide to peel one off
+            if !solo && win::ctrl_down() {
+                solo = true;
+                if !group.is_empty() {
+                    group.clear();
+                    let _ = app.emit("detached", &serial);
+                }
+            }
             if let Some(now) = rects.get(&serial) {
                 let (dx, dy) = (now.left - anchor.0, now.top - anchor.1);
                 if dx != 0 || dy != 0 {
-                    // thrown rather than moved: let go of the group, so one
-                    // flick pulls a phone back out of a row
-                    let travelled = (((dx * dx + dy * dy) as f64).sqrt()) as i32;
-                    if travelled >= FLING {
-                        hot = 2;
-                    } else if travelled >= FLICK {
-                        hot = hot.saturating_add(1);
-                    } else {
-                        hot = 0;
-                    }
-                    if hot >= 2 && !group.is_empty() {
-                        group.clear();
-                        let _ = app.emit("flicked-out", &serial);
-                    }
                     for mate in group.iter() {
                         if let (Some(r), Some(p)) = (rects.get(mate), pedals.get(mate)) {
                             win::move_visible_to(p.hwnd, r.left + dx, r.top + dy);

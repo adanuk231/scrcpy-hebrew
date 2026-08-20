@@ -458,9 +458,9 @@ listen("pedals-changed", (event) => {
   paint();
 });
 
-listen("flicked-out", (event) => {
+listen("detached", (event) => {
   const cap = caps.get(event.payload);
-  if (cap) hold(`${cap.name} thrown clear of its group`, "quiet", 1800);
+  if (cap) hold(`${cap.name} taken out of its group`, "quiet", 1800);
 });
 
 listen("autostart-changed", (e) => { loginBox.checked = !!e.payload; });

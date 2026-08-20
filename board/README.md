@@ -19,6 +19,12 @@ X. Where "beside the tray" is gets asked rather than assumed - the taskbar can
 sit on any of the four edges, on any monitor, and on a right-to-left Windows
 the notification area is at the *left* end of it.
 
+Drag the panel somewhere else and it stays there. Its contents change height
+all the time - a longer note, a different phone - and none of that is a reason
+to yank it back to the corner. It goes back to the tray when it is put away and
+opened again, however it is opened, and on a cold start. If it ends up hanging
+off the screen it is nudged back on, no further.
+
 There is one controller, not one per phone. The strip of phones along the
 bottom decides which phone it points at; the number keys pick one too. Behind
 the sliders button on the right - which stays put while the phones scroll - is
@@ -69,9 +75,9 @@ Always on, nothing to switch.
   the nearest side.
 * **A group travels together.** Drag a phone and everything stuck to it comes
   along. Stuck means touching, worked out fresh at the moment you pick it up.
-* **Throw one to get it out.** Move a phone hard enough and it lets go of its
-  group mid-drag, which is how you pull one back out of a row without dragging
-  the row with it.
+* **Ctrl to take one out.** Hold ctrl while dragging and that phone leaves its
+  group, so you can pull one back out of a row without the row coming with it.
+  Pressing ctrl part way through a drag works too - it lets go on the spot.
 * Once an edge joins, the other axis gets a much longer reach to line up, so
   shoulder-to-shoulder phones end up flush rather than stepped.
 

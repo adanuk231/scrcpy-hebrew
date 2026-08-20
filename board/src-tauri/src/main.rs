@@ -40,6 +40,9 @@ struct Pedal {
 #[derive(Default)]
 struct Board {
     pedals: Mutex<HashMap<String, Pedal>>,
+    /// where the board last put its own window, so it can tell whether the
+    /// window is still there or has been picked up and moved
+    parked: Mutex<Option<(i32, i32)>>,
 }
 
 // ------------------------------------------------------------- plumbing ----
@@ -702,7 +705,14 @@ fn hide_board(app: tauri::AppHandle) {
 /// square window, and the square shows.
 #[tauri::command]
 fn settled(app: tauri::AppHandle) {
-    park_over_tray(&app);
+    // a panel that has been carried off somewhere stays there. It goes back to
+    // the tray corner when it is put away and opened again, and on a cold
+    // start - not because its own contents changed height.
+    if adrift(&app) {
+        keep_on_screen(&app);
+    } else {
+        park_over_tray(&app);
+    }
     if let Some(window) = app.get_webview_window("main") {
         if let Ok(handle) = window.window_handle() {
             if let RawWindowHandle::Win32(h) = handle.as_raw() {
@@ -763,6 +773,40 @@ fn park_over_tray(app: &tauri::AppHandle) {
         ),
     };
     let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+    *app.state::<Board>().parked.lock().unwrap() = Some((x, y));
+}
+
+/// Has the window been moved since the board last placed it?
+fn adrift(app: &tauri::AppHandle) -> bool {
+    let window = match app.get_webview_window("main") {
+        Some(w) => w,
+        None => return false,
+    };
+    match (window.outer_position(), *app.state::<Board>().parked.lock().unwrap()) {
+        (Ok(now), Some((x, y))) => (now.x - x).abs() > 4 || (now.y - y).abs() > 4,
+        _ => true,
+    }
+}
+
+/// Keep a window that is somewhere of its own choosing on the screen, without
+/// dragging it back to the tray.
+fn keep_on_screen(app: &tauri::AppHandle) {
+    const GAP: i32 = 4;
+    let window = match app.get_webview_window("main") {
+        Some(w) => w,
+        None => return,
+    };
+    let (pos, size) = match (window.outer_position(), window.outer_size()) {
+        (Ok(p), Ok(s)) => (p, s),
+        _ => return,
+    };
+    let (w, h) = (size.width as i32, size.height as i32);
+    let area = win::work_area_at(pos.x + w / 2, pos.y + h / 2);
+    let x = pos.x.min(area.right - w - GAP).max(area.left + GAP);
+    let y = pos.y.min(area.bottom - h - GAP).max(area.top + GAP);
+    if x != pos.x || y != pos.y {
+        let _ = window.set_position(tauri::PhysicalPosition::new(x, y));
+    }
 }
 
 fn reveal(app: &tauri::AppHandle) {

@@ -132,6 +132,7 @@ const SWP_FRAMECHANGED: u32 = 0x0020;
 const SPI_GETWORKAREA: u32 = 0x0030;
 const WM_CLOSE: u32 = 0x0010;
 const VK_LBUTTON: i32 = 0x01;
+const VK_CONTROL: i32 = 0x11;
 
 // ------------------------------------------------------------- finding -----
 
@@ -275,6 +276,11 @@ pub fn work_area() -> Rect {
 
 pub fn mouse_down() -> bool {
     (unsafe { GetAsyncKeyState(VK_LBUTTON) } as u16 & 0x8000) != 0
+}
+
+/// Held down while dragging a phone, this takes it out of its group.
+pub fn ctrl_down() -> bool {
+    (unsafe { GetAsyncKeyState(VK_CONTROL) } as u16 & 0x8000) != 0
 }
 
 pub fn foreground() -> isize {
