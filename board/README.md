@@ -81,6 +81,22 @@ Always on, nothing to switch.
 * Once an edge joins, the other axis gets a much longer reach to line up, so
   shoulder-to-shoulder phones end up flush rather than stepped.
 
+### Resizing
+
+* **A phone resizes its group with it.** Pull one taller and the row comes with
+  it, each phone keeping its own shape, and the row closes up again.
+* **Ctrl resizes only the one you are pulling**, and it stays in the group - so
+  one phone can be a different size from the rest without leaving the slab.
+* **No black bars.** The picture has a fixed shape, so the window is put back to
+  that shape when you let go. The edge you dragged is the one you meant, so it
+  decides and the other follows: pull the bottom down and it gets taller *and*
+  wider. Only a corner, where you moved both, is fitted inside what you drew.
+
+The shape comes from scrcpy's own log rather than from the window - a window
+that has been pulled out of shape has black bars in it, and measuring that
+would just preserve them. scrcpy prints `Texture: 1080x2280`, and prints it
+again when the phone rotates.
+
 `line them up` puts every running phone in a row, in tab order; dragging a tab
 sideways reorders and re-lays them out.
 
@@ -163,6 +179,8 @@ scrcpy-board.exe selftest keep       # every phone, left running
 scrcpy-board.exe selftest readopt    # pick up phones left running, then close
 scrcpy-board.exe selftest autostart  # the Run key round-trips and restores
 scrcpy-board.exe selftest drags      # what the shell reports while you drag a phone
+scrcpy-board.exe selftest aspect     # pull a phone out of shape, then put it back
+scrcpy-board.exe selftest resizegroup # resize one of a pair, check the row follows
 ```
 
 `keep` followed by `readopt` from a second process is the proof that phones

@@ -21,6 +21,7 @@ extern "system" {
     fn SetWindowPos(hwnd: isize, after: isize, x: i32, y: i32, w: i32, h: i32, flags: u32) -> i32;
     fn SetFocus(hwnd: isize) -> isize;
     fn GetWindowRect(hwnd: isize, rect: *mut Rect) -> i32;
+    fn GetClientRect(hwnd: isize, rect: *mut Rect) -> i32;
     fn GetWindowThreadProcessId(hwnd: isize, pid: *mut u32) -> u32;
     fn AttachThreadInput(attach: u32, attach_to: u32, join: i32) -> i32;
     fn GetAsyncKeyState(key: i32) -> i16;
@@ -266,6 +267,36 @@ pub fn move_visible_to(hwnd: isize, x: i32, y: i32) {
         _ => return,
     };
     move_to(hwnd, x - (inner.left - outer.left), y - (inner.top - outer.top));
+}
+
+/// The picture itself, without frame or title bar.
+pub fn client_size(hwnd: isize) -> Option<(i32, i32)> {
+    let mut r = Rect::default();
+    if unsafe { GetClientRect(hwnd, &mut r) } == 0 || r.w() <= 0 || r.h() <= 0 {
+        return None;
+    }
+    Some((r.w(), r.h()))
+}
+
+/// How much bigger the window looks than the picture inside it.
+pub fn frame_extra(hwnd: isize) -> (i32, i32) {
+    match (visible_rect(hwnd), client_size(hwnd)) {
+        (Some(v), Some((cw, ch))) => (v.w() - cw, v.h() - ch),
+        _ => (0, 0),
+    }
+}
+
+/// Move and size in visible coordinates, border allowed for.
+pub fn place_visible(hwnd: isize, x: i32, y: i32, w: i32, h: i32) {
+    let (outer, inner) = match (rect_of(hwnd), visible_rect(hwnd)) {
+        (Some(o), Some(i)) => (o, i),
+        _ => return,
+    };
+    let pad_x = inner.left - outer.left;
+    let pad_y = inner.top - outer.top;
+    let pad_w = outer.w() - inner.w();
+    let pad_h = outer.h() - inner.h();
+    place(hwnd, x - pad_x, y - pad_y, w + pad_w, h + pad_h);
 }
 
 pub fn work_area() -> Rect {

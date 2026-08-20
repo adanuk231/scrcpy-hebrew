@@ -129,6 +129,30 @@ fn local_dir() -> PathBuf {
     PathBuf::from(base).join("scrcpy-hebrew")
 }
 
+/// The shape of the picture, straight out of scrcpy's log.
+///
+/// The window on screen is not a reliable answer: resize it by hand and it
+/// keeps whatever shape you left it, black bars and all. scrcpy prints the
+/// texture it is drawing - and prints it again when the phone rotates - so the
+/// last one in the log is the truth.
+pub fn video_aspect(serial: &str) -> Option<f64> {
+    let text = std::fs::read_to_string(local_dir().join(format!("board-{}.log", serial))).ok()?;
+    let mut found = None;
+    for line in text.lines() {
+        if let Some(rest) = line.split("Texture: ").nth(1) {
+            let mut parts = rest.trim().split('x');
+            if let (Some(w), Some(h)) = (parts.next(), parts.next()) {
+                if let (Ok(w), Ok(h)) = (w.trim().parse::<f64>(), h.trim().parse::<f64>()) {
+                    if w > 0.0 && h > 0.0 {
+                        found = Some(w / h);
+                    }
+                }
+            }
+        }
+    }
+    found
+}
+
 /// Tell the Hebrew daemon which phone each window belongs to, so it never has
 /// to guess from a window title.
 fn publish_windows(pedals: &HashMap<String, Pedal>) {
@@ -555,6 +579,102 @@ fn devices() -> Vec<(String, String, String)> {
 
 fn selftest(what: String) -> i32 {
     let board = Board::default();
+
+    if what.starts_with("aspect") {
+        // pull a phone out of shape the way a free resize would, then let the
+        // same code the mouse uses put it back
+        let board = Board::default();
+        let list = devices();
+        let (serial, name, keyboard) = match list.first() {
+            Some(d) => d.clone(),
+            None => {
+                println!("no phones");
+                return 1;
+            }
+        };
+        if let Err(e) = start_inner(&board, serial.clone(), test_opts(&name, &keyboard)) {
+            println!("start FAILED: {}", e);
+            return 1;
+        }
+        let hwnd = board.pedals.lock().unwrap()[&serial].hwnd;
+        let aspect = video_aspect(&serial);
+        println!("scrcpy says the picture is {:?} wide per tall", aspect);
+
+        let before = win::visible_rect(hwnd).unwrap_or_default();
+        let (cw, ch) = win::client_size(hwnd).unwrap_or((0, 0));
+        println!("as opened: {}x{} of picture, {:.4} shape", cw, ch, cw as f64 / ch as f64);
+
+        // drag the right edge far out, which is what makes the black bars
+        win::place_visible(hwnd, before.left, before.top, before.w() + 260, before.h());
+        let (cw, ch) = win::client_size(hwnd).unwrap_or((0, 0));
+        println!("pulled out:  {}x{} of picture, {:.4} shape", cw, ch, cw as f64 / ch as f64);
+
+        let group = std::collections::HashSet::new();
+        magnet::resize_done(&board.pedals.lock().unwrap(), &serial, &before, &group, true);
+        let (cw, ch) = win::client_size(hwnd).unwrap_or((0, 0));
+        let shape = cw as f64 / ch.max(1) as f64;
+        println!("put back:    {}x{} of picture, {:.4} shape", cw, ch, shape);
+
+        let wanted = aspect.unwrap_or(shape);
+        let off = (shape - wanted).abs();
+        println!("off by {:.4}", off);
+        stop_inner(&board, &serial);
+        return if off < 0.02 { 0 } else { 1 };
+    }
+
+    if what == "resizegroup" {
+        // two phones, side by side and touching, then one of them is dragged
+        // taller: the other should come with it and the row should close up
+        let board = Board::default();
+        let list = devices();
+        if list.len() < 2 {
+            println!("needs two phones");
+            return 1;
+        }
+        for (serial, name, keyboard) in &list {
+            if let Err(e) = start_inner(&board, serial.clone(), test_opts(name, keyboard)) {
+                println!("{} FAILED: {}", name, e);
+                return 1;
+            }
+        }
+        let pedals = board.pedals.lock().unwrap();
+        let show = |label: &str| {
+            for (serial, _, _) in &list {
+                if let Some(r) = pedals.get(serial).and_then(|p| win::visible_rect(p.hwnd)) {
+                    println!("  {:<10} {:<18} {},{} {}x{}", label, serial, r.left, r.top, r.w(), r.h());
+                }
+            }
+        };
+        show("before");
+
+        let first = list[0].0.clone();
+        let hwnd = pedals[&first].hwnd;
+        let from = win::visible_rect(hwnd).unwrap_or_default();
+        // drag its bottom edge down by 120, the way a mouse would
+        win::place_visible(hwnd, from.left, from.top, from.w(), from.h() + 120);
+
+        let group: std::collections::HashSet<String> =
+            list[1..].iter().map(|(s, _, _)| s.clone()).collect();
+        magnet::resize_done(&pedals, &first, &from, &group, false);
+        show("after");
+
+        let mut rects: Vec<win::Rect> = list
+            .iter()
+            .filter_map(|(s, _, _)| pedals.get(s).and_then(|p| win::visible_rect(p.hwnd)))
+            .collect();
+        rects.sort_by_key(|r| r.left);
+        let same_height = rects.windows(2).all(|w| (w[0].h() - w[1].h()).abs() <= 2);
+        let flush = rects.windows(2).all(|w| (w[0].right - w[1].left).abs() <= 2);
+        let grew = rects.iter().any(|r| r.h() > from.h());
+        println!("all the same height: {}", same_height);
+        println!("still one slab:      {}", flush);
+        println!("actually taller:     {}", grew);
+        drop(pedals);
+        for (serial, _, _) in &list {
+            stop_inner(&board, serial);
+        }
+        return if same_height && flush && grew { 0 } else { 1 };
+    }
 
     if what == "drags" {
         // the magnet takes its cue from the shell rather than from guessing,

@@ -203,6 +203,123 @@ pub fn arrange(pedals: &HashMap<String, Pedal>, order: &[String]) {
     }
 }
 
+/// The largest box of the right shape that fits inside what was dragged out.
+///
+/// The picture has a fixed shape, so a window of any other shape is padding.
+/// Fitting inside rather than around means the window only ever ends up
+/// smaller than you dragged it, never surprising you by growing.
+fn fit_to_aspect(w: i32, h: i32, aspect: f64) -> (i32, i32) {
+    let by_width = ((h as f64) * aspect).round() as i32;
+    if by_width <= w {
+        (by_width.max(80), h.max(80))
+    } else {
+        let by_height = ((w as f64) / aspect).round() as i32;
+        (w.max(80), by_height.max(80))
+    }
+}
+
+/// Put a phone at this visible size, keeping whichever edges were not dragged.
+///
+/// The edge you pulled is the one you meant, so it decides and the other
+/// follows. Drag the bottom down and the window gets taller *and* wider;
+/// only a corner, where you moved both, is fitted inside what you drew.
+fn resize_one(hwnd: isize, aspect: f64, want: &win::Rect, from: &win::Rect) -> win::Rect {
+    let (extra_w, extra_h) = win::frame_extra(hwnd);
+    let want_w = (want.w() - extra_w).max(80);
+    let want_h = (want.h() - extra_h).max(80);
+    let moved_w = want.w() != from.w();
+    let moved_h = want.h() != from.h();
+    let (cw, ch) = if moved_w && !moved_h {
+        (want_w, ((want_w as f64) / aspect).round().max(80.0) as i32)
+    } else if moved_h && !moved_w {
+        (((want_h as f64) * aspect).round().max(80.0) as i32, want_h)
+    } else {
+        fit_to_aspect(want_w, want_h, aspect)
+    };
+    let (w, h) = (cw + extra_w, ch + extra_h);
+    // the edge that moved is the one under the cursor, so hold the other one
+    let x = if want.left != from.left { want.right - w } else { want.left };
+    let y = if want.top != from.top { want.bottom - h } else { want.top };
+    win::place_visible(hwnd, x, y, w, h);
+    win::Rect { left: x, top: y, right: x + w, bottom: y + h }
+}
+
+/// A phone has been resized. Take the black bars off it, and unless ctrl was
+/// held, put the rest of its group to the same height (or width) and close the
+/// row up again so it stays one slab.
+pub fn resize_done(pedals: &HashMap<String, Pedal>, serial: &str, from: &win::Rect,
+               group: &HashSet<String>, solo: bool) {
+    let pedal = match pedals.get(serial) {
+        Some(p) => p,
+        None => return,
+    };
+    let now = match win::visible_rect(pedal.hwnd) {
+        Some(r) => r,
+        None => return,
+    };
+    let aspect = crate::video_aspect(serial)
+        .unwrap_or(now.w() as f64 / now.h().max(1) as f64);
+    let settled = resize_one(pedal.hwnd, aspect, &now, from);
+    if solo || group.is_empty() {
+        // grown sideways, it may be sitting on somebody now
+        let others: Vec<win::Rect> = pedals
+            .iter()
+            .filter(|(s, _)| s.as_str() != serial)
+            .filter_map(|(_, p)| win::visible_rect(p.hwnd))
+            .collect();
+        let (dx, dy) = settle(&settled, &others, &win::work_area());
+        if dx != 0 || dy != 0 {
+            win::move_visible_to(pedal.hwnd, settled.left + dx, settled.top + dy);
+        }
+        return;
+    }
+
+    // a row or a column? whichever way the group already lies
+    let mates: Vec<(&String, win::Rect)> = group
+        .iter()
+        .filter_map(|s| pedals.get(s).and_then(|p| win::visible_rect(p.hwnd)).map(|r| (s, r)))
+        .collect();
+    let row = mates.iter().all(|(_, r)| spans(r.top, r.bottom, from.top, from.bottom));
+    let column = !row
+        && mates.iter().all(|(_, r)| spans(r.left, r.right, from.left, from.right));
+    if !row && !column {
+        return;
+    }
+
+    let mut line: Vec<(isize, f64, win::Rect)> = Vec::new();
+    for (s, r) in &mates {
+        if let Some(p) = pedals.get(*s) {
+            let a = crate::video_aspect(s).unwrap_or(r.w() as f64 / r.h().max(1) as f64);
+            line.push((p.hwnd, a, *r));
+        }
+    }
+    line.push((pedal.hwnd, aspect, settled));
+
+    if row {
+        line.sort_by_key(|(_, _, r)| r.left);
+        let left = line.iter().map(|(_, _, r)| r.left).min().unwrap_or(settled.left);
+        let mut x = left;
+        for (hwnd, a, _) in &line {
+            let (extra_w, extra_h) = win::frame_extra(*hwnd);
+            let ch = settled.h() - extra_h;
+            let cw = ((ch as f64) * a).round() as i32;
+            win::place_visible(*hwnd, x, settled.top, cw + extra_w, ch + extra_h);
+            x += cw + extra_w;
+        }
+    } else {
+        line.sort_by_key(|(_, _, r)| r.top);
+        let top = line.iter().map(|(_, _, r)| r.top).min().unwrap_or(settled.top);
+        let mut y = top;
+        for (hwnd, a, _) in &line {
+            let (extra_w, extra_h) = win::frame_extra(*hwnd);
+            let cw = settled.w() - extra_w;
+            let ch = ((cw as f64) / a).round() as i32;
+            win::place_visible(*hwnd, settled.left, y, cw + extra_w, ch + extra_h);
+            y += ch + extra_h;
+        }
+    }
+}
+
 /// Windows says when a drag starts and ends. The polling in between only
 /// carries the group along and measures how hard the phone is being thrown.
 pub fn run(app: tauri::AppHandle, drags: std::sync::mpsc::Receiver<win::Drag>) {
@@ -211,6 +328,7 @@ pub fn run(app: tauri::AppHandle, drags: std::sync::mpsc::Receiver<win::Drag>) {
     let mut anchor = (0, 0);
     let mut solo = false;
     let mut was_visible = true;
+    let mut grabbed: Option<win::Rect> = None;
 
     loop {
         std::thread::sleep(TICK);
@@ -265,6 +383,7 @@ pub fn run(app: tauri::AppHandle, drags: std::sync::mpsc::Receiver<win::Drag>) {
                             c
                         };
                         anchor = rects.get(&serial).map(|r| (r.left, r.top)).unwrap_or((0, 0));
+                        grabbed = rects.get(&serial).copied();
                         dragging = Some(serial);
                     }
                 }
@@ -272,6 +391,19 @@ pub fn run(app: tauri::AppHandle, drags: std::sync::mpsc::Receiver<win::Drag>) {
                     let ours = pedals.iter().find(|(_, p)| p.hwnd == hwnd).map(|(s, _)| s.clone());
                     let is_ours = ours.as_deref() == dragging.as_deref();
                     if let (Some(serial), true) = (ours, is_ours) {
+                        let resized = match (grabbed, win::visible_rect(pedals[&serial].hwnd)) {
+                            (Some(was), Some(now)) => was.w() != now.w() || was.h() != now.h(),
+                            _ => false,
+                        };
+                        if resized {
+                            let from = grabbed.unwrap_or_default();
+                            resize_done(&pedals, &serial, &from, &group, solo);
+                            dragging = None;
+                            group.clear();
+                            solo = false;
+                            grabbed = None;
+                            continue;
+                        }
                         if let Some(now) = win::visible_rect(pedals[&serial].hwnd) {
                             let others: Vec<win::Rect> = rects
                                 .iter()
@@ -291,6 +423,7 @@ pub fn run(app: tauri::AppHandle, drags: std::sync::mpsc::Receiver<win::Drag>) {
                         dragging = None;
                         group.clear();
                         solo = false;
+                        grabbed = None;
                     }
                 }
             }
