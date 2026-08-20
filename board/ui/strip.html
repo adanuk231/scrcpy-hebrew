@@ -1,0 +1,107 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>strip</title>
+<style>
+  /* A row of icons with nothing behind them, floating over the phone. The
+     window is transparent, so the only thing on screen is the marks
+     themselves - which means they need their own shadow to stay legible over
+     a phone screen that could be any colour. */
+  html, body {
+    margin: 0;
+    height: 100%;
+    background: transparent;
+    overflow: hidden;
+    user-select: none;
+    cursor: default;
+    font: 12px/1 "Segoe UI", system-ui, sans-serif;
+  }
+
+  body {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 2px;
+  }
+
+  /* the space between the icons is the handle the phone is dragged by */
+  #grip {
+    position: absolute;
+    inset: 0;
+  }
+
+  button {
+    position: relative;
+    width: 26px;
+    height: 26px;
+    border: 0;
+    background: transparent;
+    padding: 0;
+    display: grid;
+    place-items: center;
+    color: rgba(255, 255, 255, 0.72);
+    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.85));
+    cursor: pointer;
+  }
+
+  button:hover { color: #fff; }
+  button:active { transform: translateY(1px); }
+  button.on { color: #7ab2ff; }
+  button.warm:hover { color: #ff8f8f; }
+
+  svg { width: 15px; height: 15px; }
+  svg [fill="none"] { stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; }
+
+  .dots {
+    width: 12px;
+    height: 12px;
+    background-image: radial-gradient(circle, rgba(255,255,255,.75) 1.1px, transparent 1.3px);
+    background-size: 4px 4px;
+    filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.85));
+  }
+</style>
+
+<div id="grip"></div>
+
+<button id="move" title="drag the phone"><span class="dots"></span></button>
+
+<button id="skin" title="rounded corners">
+  <svg viewBox="0 0 16 16" aria-hidden="true">
+    <rect x="4" y="1.6" width="8" height="12.8" rx="3" fill="none" stroke-width="1.5"/>
+  </svg>
+</button>
+
+<button id="pick" title="show this phone on the board">
+  <svg viewBox="0 0 16 16" aria-hidden="true">
+    <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h6" fill="none" stroke-width="1.5"/>
+  </svg>
+</button>
+
+<button id="stop" class="warm" title="stop mirroring">
+  <svg viewBox="0 0 16 16" aria-hidden="true">
+    <path d="M4.5 4.5l7 7M11.5 4.5l-7 7" fill="none" stroke-width="1.7"/>
+  </svg>
+</button>
+
+<script>
+  const invoke = window.__TAURI__.core.invoke;
+  const listen = window.__TAURI__.event.listen;
+
+  let target = null;
+
+  listen("strip-target", (event) => {
+    target = event.payload;
+    document.getElementById("skin").classList.toggle("on", !!(target && target.skin));
+  });
+
+  // anywhere that is not an icon drags the phone, and so does the grip icon
+  for (const el of [document.getElementById("grip"), document.getElementById("move")]) {
+    el.addEventListener("pointerdown", (e) => {
+      e.preventDefault();
+      invoke("strip_drag");
+    });
+  }
+
+  document.getElementById("skin").addEventListener("click", () => invoke("strip_skin"));
+  document.getElementById("pick").addEventListener("click", () => invoke("strip_pick"));
+  document.getElementById("stop").addEventListener("click", () => invoke("strip_stop"));
+</script>

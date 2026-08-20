@@ -66,6 +66,30 @@ notifications, power. These go over adb rather than through scrcpy's shortcuts,
 so they are instant, they do not care which window has focus, and they still
 work on a phone you are mirroring with `look` on.
 
+## The phones have no title bar
+
+A phone window is the picture and nothing else. What a title bar was for now
+floats over the top of whichever phone has the keyboard: a handle to drag it
+by, rounded corners on and off, show this phone on the board, and stop
+mirroring. Icons only, on a window with no background at all - the strip is
+transparent, so the only thing on screen is the marks, which carry their own
+shadow to stay readable over any picture.
+
+One strip, not one per phone. Only one phone can have the keyboard at a time,
+and a second webview hanging over every phone is a lot of machinery for a row
+of four icons. It follows the focused phone, sits just above it (or just inside
+the top, if the phone is against the top of the screen), and parks off-screen
+when you are working somewhere else - with a moment's grace, so a wobble in the
+focus does not snatch the icons out from under the cursor.
+
+Two things this needed. `--window-borderless` takes `WS_THICKFRAME` off along
+with the title bar, and without it a window cannot be resized at all, so it is
+put back: Windows then gives the invisible grab margin without drawing
+anything, since there is no caption to draw a frame around. And a window with
+no caption is dragged by asking it to start the move loop it would have started
+from one, which is `WM_NCLBUTTONDOWN` with `HTCAPTION` - so the magnet sees an
+ordinary drag and behaves exactly as it does for any other.
+
 ## Magnet
 
 Always on, nothing to switch.

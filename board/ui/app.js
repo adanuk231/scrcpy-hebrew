@@ -464,6 +464,20 @@ listen("detached", (event) => {
 
 listen("autostart-changed", (e) => { loginBox.checked = !!e.payload; });
 
+// the floating strip over a phone can change things too
+listen("skin-changed", (e) => {
+  const [serial, on] = e.payload || [];
+  if (caps.has(serial)) {
+    optionsFor(serial).skin = !!on;
+    save();
+    if (serial === selected) paint();
+  }
+});
+
+listen("pick", (e) => {
+  if (caps.has(e.payload)) select(e.payload);
+});
+
 const saved = load();
 showPage("deck");
 invoke("autostart_state").then((on) => { loginBox.checked = on; });

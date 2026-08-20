@@ -355,12 +355,51 @@ pub fn square_corners(hwnd: isize) {
     unsafe { SetWindowRgn(hwnd, 0, 1) };
 }
 
+/// Give a window back its (invisible) resize border.
+///
+/// `--window-borderless` takes WS_THICKFRAME off along with the title bar, and
+/// without it the window cannot be resized at all - no edges, no corners. Put
+/// it back and Windows gives you the seven-pixel grab margin again while
+/// drawing nothing, since there is no caption to draw a frame around.
+pub fn resizable_edges(hwnd: isize) {
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        if style & WS_THICKFRAME == 0 {
+            SetWindowLongPtrW(hwnd, GWL_STYLE, style | WS_THICKFRAME);
+            SetWindowPos(hwnd, 0, 0, 0, 0, 0,
+                         SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER
+                             | SWP_NOACTIVATE);
+        }
+    }
+}
+
+/// Clicks on this window must not take the keyboard away from the phone it is
+/// floating over.
+pub fn never_activate(hwnd: isize) {
+    const WS_EX_NOACTIVATE: isize = 0x0800_0000;
+    const WS_EX_TOOLWINDOW: isize = 0x0000_0080;
+    unsafe {
+        let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+        SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW);
+    }
+}
+
+/// Ask a window to start the move loop it would start from its own title bar,
+/// which is how a phone with no title bar is dragged by something else.
+pub fn begin_move(hwnd: isize) {
+    const WM_NCLBUTTONDOWN: u32 = 0x00A1;
+    const HTCAPTION: usize = 2;
+    unsafe {
+        PostMessageW(hwnd, WM_NCLBUTTONDOWN, HTCAPTION, 0);
+    }
+}
+
 /// Strip the frame off a window we did not start borderless.
 pub fn chromeless(hwnd: isize, on: bool) {
     unsafe {
         let mut style = GetWindowLongPtrW(hwnd, GWL_STYLE);
         if on {
-            style &= !(WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX);
+            style &= !(WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX);
         } else {
             style |= WS_CAPTION | WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
         }

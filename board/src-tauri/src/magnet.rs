@@ -13,7 +13,7 @@
 //! forming once windows had been moved by hand.
 
 use std::collections::{HashMap, HashSet};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tauri::{Emitter, Manager};
 
@@ -320,6 +320,67 @@ pub fn resize_done(pedals: &HashMap<String, Pedal>, serial: &str, from: &win::Re
     }
 }
 
+/// Keep the floating strip over whichever phone has the keyboard.
+///
+/// The strip itself is marked never-activate, so clicking its icons does not
+/// take the focus off the phone and does not make the strip disappear from
+/// under the cursor.
+///
+/// Everything this needs is worked out under the lock and handed over; it must
+/// not hold the pedals itself, because tauri's window calls wait on the main
+/// thread and the main thread locks the pedals on every refresh.
+fn follow_focus(app: &tauri::AppHandle, on: Option<(String, win::Rect, bool)>,
+                aiming: &mut Option<String>, aimed_at: &mut Instant) {
+    let aim_state = app.state::<std::sync::Mutex<crate::Aim>>();
+    let (hwnd, (w, h)) = {
+        let aim = aim_state.lock().unwrap();
+        (aim.hwnd, aim.size)
+    };
+    if tracing() {
+        trace(&format!("hwnd={} fg={} aim={:?}", hwnd, win::foreground(),
+                       on.as_ref().map(|(s, _, _)| s.clone())));
+    }
+    if hwnd == 0 {
+        return;
+    }
+
+    let (target, rect, skin) = match on {
+        Some(found) => found,
+        None => {
+            // the strip never takes the focus itself, so anything that is not a
+            // phone means the user has gone elsewhere
+            // a moment's grace, so a wobble in the focus does not snatch the
+            // icons away from under the cursor on the way to clicking one
+            if aiming.is_some() && aimed_at.elapsed() > Duration::from_millis(700) {
+                win::move_to(hwnd, -6000, -6000);
+                *aiming = None;
+                aim_state.lock().unwrap().serial = None;
+            }
+            return;
+        }
+    };
+
+    *aimed_at = Instant::now();
+    let area = win::work_area_at((rect.left + rect.right) / 2, rect.top);
+    let x = ((rect.left + rect.right) / 2 - w / 2)
+        .max(area.left)
+        .min(area.right - w);
+    // above the phone, unless the phone is against the top of the screen
+    let above = rect.top - h - 4;
+    let y = if above >= area.top { above } else { rect.top + 4 };
+    win::move_to(hwnd, x, y);
+
+    if aiming.as_deref() != Some(target.as_str()) {
+        *aiming = Some(target.clone());
+        aim_state.lock().unwrap().serial = Some(target.clone());
+        let _ = app.emit("strip-target", serde_json::json!({
+            "serial": target,
+            "skin": skin,
+        }));
+    }
+    win::raise(hwnd);
+}
+
 /// Windows says when a drag starts and ends. The polling in between only
 /// carries the group along and measures how hard the phone is being thrown.
 pub fn run(app: tauri::AppHandle, drags: std::sync::mpsc::Receiver<win::Drag>) {
@@ -329,6 +390,8 @@ pub fn run(app: tauri::AppHandle, drags: std::sync::mpsc::Receiver<win::Drag>) {
     let mut solo = false;
     let mut was_visible = true;
     let mut grabbed: Option<win::Rect> = None;
+    let mut aiming: Option<String> = None;
+    let mut aimed_at = Instant::now();
 
     loop {
         std::thread::sleep(TICK);
@@ -429,6 +492,16 @@ pub fn run(app: tauri::AppHandle, drags: std::sync::mpsc::Receiver<win::Drag>) {
             }
         }
 
+        let aim = {
+            let fg = win::foreground();
+            pedals
+                .iter()
+                .find(|(_, p)| p.hwnd == fg)
+                .and_then(|(serial, p)| {
+                    rects.get(serial).map(|r| (serial.clone(), *r, p.skin))
+                })
+        };
+
         if let Some(serial) = dragging.clone() {
             // ctrl part way through a drag counts too, so you can start
             // moving a pair and then decide to peel one off
@@ -451,5 +524,27 @@ pub fn run(app: tauri::AppHandle, drags: std::sync::mpsc::Receiver<win::Drag>) {
                 }
             }
         }
+
+        drop(pedals);
+        follow_focus(&app, aim, &mut aiming, &mut aimed_at);
+    }
+}
+
+
+/// Set BOARD_TRACE=1 to have the strip say what it is being told to do. Kept
+/// because "the icons did not appear" has three possible causes and this
+/// separates them in one line: whether the loop runs, what Windows says has
+/// the focus, and whether that is a phone.
+fn tracing() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("BOARD_TRACE").is_ok())
+}
+
+pub fn trace(line: &str) {
+    use std::io::Write;
+    let path = std::env::var("LOCALAPPDATA").unwrap_or_default();
+    let path = std::path::Path::new(&path).join("scrcpy-hebrew").join("strip.log");
+    if let Ok(mut fh) = std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        let _ = writeln!(fh, "{}", line);
     }
 }

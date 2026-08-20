@@ -209,9 +209,8 @@ fn scrcpy_args(serial: &str, title: &str, o: &Opts) -> Vec<String> {
         "--window-x=-6000".into(),
         "--window-y=-6000".into(),
     ];
-    if o.skin {
-        a.push("--window-borderless".into());
-    }
+    // no title bar on a phone, ever: the floating strip is its handle
+    a.push("--window-borderless".into());
     if o.keyboard == "uhid" {
         a.push("--keyboard=uhid".into());
     }
@@ -323,6 +322,8 @@ fn start_inner(board: &Board, serial: String, opts: Opts) -> Result<Started, Str
 
     // the unique title was only ever a handle; show the phone's name
     win::rename(hwnd, if opts.name.is_empty() { &serial } else { &opts.name });
+    // borderless costs the resize border too, and that is worth having back
+    win::resizable_edges(hwnd);
 
     let size = win::visible_rect(hwnd).unwrap_or_default();
     let taken: Vec<win::Rect> = {
@@ -389,7 +390,7 @@ fn running(state: State<Board>) -> Vec<String> {
 fn set_skin(state: State<Board>, serial: String, on: bool) -> Result<(), String> {
     let mut pedals = state.pedals.lock().unwrap();
     let pedal = pedals.get_mut(&serial).ok_or("that phone is not running")?;
-    win::chromeless(pedal.hwnd, on);
+    // the title bar is gone either way now; skin is the rounded corners
     if on {
         win::round_corners(pedal.hwnd, 34);
     } else {
@@ -483,6 +484,110 @@ fn open_logs() {
         .arg(local_dir())
         .creation_flags(CREATE_NO_WINDOW)
         .spawn();
+}
+
+// ---------------------------------------------------------------- strip ----
+
+/// A row of icons that floats over whichever phone you are working in.
+///
+/// One strip rather than one per phone: only one phone can have the keyboard
+/// at a time, and a second webview per phone is a lot of machinery to hang
+/// over a picture. It follows the focused phone and hides when none is.
+fn build_strip(app: &tauri::AppHandle) -> tauri::Result<()> {
+    let strip = tauri::WebviewWindowBuilder::new(
+        app, "strip", tauri::WebviewUrl::App("strip.html".into()))
+        .title("board strip")
+        .inner_size(124.0, 30.0)
+        .decorations(false)
+        .transparent(true)
+        .always_on_top(true)
+        .skip_taskbar(true)
+        .resizable(false)
+        .shadow(false)
+        .focused(false)
+        .position(-6000.0, -6000.0)
+        .build()?;
+    if let Ok(handle) = strip.window_handle() {
+        if let RawWindowHandle::Win32(h) = handle.as_raw() {
+            let hwnd = h.hwnd.get();
+            win::never_activate(hwnd);
+            // it lives off-screen when there is no phone to sit on, rather
+            // than being hidden: a window's own toolkit keeps a visibility
+            // flag, and arguing with it from another thread is a losing game
+            win::move_to(hwnd, -6000, -6000);
+            let size = strip.outer_size().map(|s| (s.width as i32, s.height as i32))
+                .unwrap_or((136, 39));
+            let state = app.state::<Mutex<Aim>>();
+            let mut aim = state.lock().unwrap();
+            aim.hwnd = hwnd;
+            aim.size = size;
+        }
+    }
+    Ok(())
+}
+
+/// Which phone the strip is over, and the strip's own window handle.
+///
+/// The handle is kept because the strip is moved and shown from the magnet
+/// thread thirty times a second: tauri's window calls have to hop to the main
+/// thread and back, which is both slower than it needs to be and one more
+/// thing that can wait on a lock. Win32 does it on the calling thread.
+#[derive(Default)]
+struct Aim {
+    serial: Option<String>,
+    hwnd: isize,
+    size: (i32, i32),
+}
+
+fn aimed_at(app: &tauri::AppHandle) -> Option<String> {
+    app.state::<Mutex<Aim>>().lock().unwrap().serial.clone()
+}
+
+#[tauri::command]
+fn strip_drag(app: tauri::AppHandle, state: State<Board>) {
+    if let Some(serial) = aimed_at(&app) {
+        let pedals = state.pedals.lock().unwrap();
+        if let Some(pedal) = pedals.get(&serial) {
+            win::begin_move(pedal.hwnd);
+        }
+    }
+}
+
+#[tauri::command]
+fn strip_skin(app: tauri::AppHandle, state: State<Board>) {
+    if let Some(serial) = aimed_at(&app) {
+        let on = {
+            let mut pedals = state.pedals.lock().unwrap();
+            match pedals.get_mut(&serial) {
+                Some(pedal) => {
+                    pedal.skin = !pedal.skin;
+                    if pedal.skin {
+                        win::round_corners(pedal.hwnd, 30);
+                    } else {
+                        win::square_corners(pedal.hwnd);
+                    }
+                    pedal.skin
+                }
+                None => return,
+            }
+        };
+        let _ = app.emit("skin-changed", (serial, on));
+    }
+}
+
+#[tauri::command]
+fn strip_stop(app: tauri::AppHandle, state: State<Board>) {
+    if let Some(serial) = aimed_at(&app) {
+        stop_inner(&state, &serial);
+    }
+}
+
+#[tauri::command]
+fn strip_pick(app: tauri::AppHandle) {
+    if let Some(serial) = aimed_at(&app) {
+        let _ = app.emit("pick", serial);
+        reveal(&app);
+    }
 }
 
 // ----------------------------------------------------------------- main ----
@@ -1028,10 +1133,12 @@ fn main() {
 
     tauri::Builder::default()
         .manage(Board::default())
+        .manage(Mutex::new(Aim::default()))
         .setup(move |app| {
             readopt(&app.state::<Board>());
             start_daemon();
             build_tray(app.handle())?;
+            build_strip(app.handle())?;
             if start_hidden {
                 if let Some(window) = app.get_webview_window("main") {
                     let _ = window.hide();
@@ -1057,7 +1164,8 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             probe, start, stop, running, set_skin, arrange,
             focus_device, action, rotate, status, open_logs,
-            autostart_state, set_autostart, hide_board, settled
+            autostart_state, set_autostart, hide_board, settled,
+            strip_drag, strip_skin, strip_stop, strip_pick
         ])
         .run(tauri::generate_context!())
         .expect("board failed to start");
