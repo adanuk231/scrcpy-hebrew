@@ -371,20 +371,49 @@ pub fn square_corners(hwnd: isize) {
     unsafe { SetWindowRgn(hwnd, 0, 1) };
 }
 
-// A phone has no resize border, and must not be given one.
-//
-// The obvious move on a borderless window is to put `WS_THICKFRAME` back: the
-// cursors return and nothing is drawn, since there is no caption to frame.
-// What it actually does is freeze the window. The min and max track sizes from
-// `WM_GETMINMAXINFO` are only enforced on a window that has a sizing border,
-// and SDL answers that message with the size it thinks the window should be -
-// the same number twice, because as far as SDL is concerned this window was
-// never resizable. Add the border and every resize, ours included, is clamped
-// straight back. Measured: with it on, a window asked for 300x660 came back
-// 273x600, its size at birth; with it off again the same call took.
-//
-// So the phone keeps no frame at all and the board resizes it by hand, from
-// the strip, the same way it moves it.
+/// The area the window's owner draws into.
+///
+/// For a phone this must equal the window itself. If it ever stops matching,
+/// the picture has stopped following the frame - which is what a scrcpy
+/// window does when SDL thinks it is not resizable, and the reason the phones
+/// are not started borderless. Worth checking rather than assuming: it fails
+/// silently, as a window that resizes while the picture inside it does not.
+pub fn client_size(hwnd: isize) -> Option<(i32, i32)> {
+    let mut r = Rect::default();
+    if unsafe { GetClientRect(hwnd, &mut r) } == 0 || r.w() <= 0 || r.h() <= 0 {
+        return None;
+    }
+    Some((r.w(), r.h()))
+}
+
+/// Take everything off a window but the picture: no title bar, no frame, no
+/// sizing border. What is left is one rectangle that Windows, DWM and the
+/// window's own client area all agree on.
+///
+/// The order matters, and it is not the obvious one. Asking scrcpy for
+/// `--window-borderless` gives a window SDL considers **not resizable**, and
+/// SDL then answers `WM_NCCALCSIZE` by pinning the client area to the size the
+/// window was born at. Resize that window from outside and the frame grows
+/// while the picture stays exactly as it was, showing a crop. Putting
+/// `WS_THICKFRAME` back to get the resize border makes it worse: min and max
+/// track sizes are only enforced on a window that has a sizing border, and SDL
+/// answers that message with the same number twice, so the window snaps back
+/// to its birth size - asked for 300x660, it came back 273x600.
+///
+/// Started as an ordinary window it is resizable as far as SDL is concerned,
+/// and stays that way: SDL's idea of the window is its own, and stripping the
+/// styles here does not change it. Measured after stripping: window, DWM
+/// bounds and client area all 243x539, then all 380x830 after a resize, with
+/// the picture scaling to match.
+pub fn strip_frame(hwnd: isize) {
+    unsafe {
+        let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+        SetWindowLongPtrW(hwnd, GWL_STYLE, style
+            & !(WS_CAPTION | WS_SYSMENU | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX));
+        SetWindowPos(hwnd, 0, 0, 0, 0, 0,
+                     SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+}
 
 /// Clicks on this window must not take the keyboard away from the phone it is
 /// floating over.

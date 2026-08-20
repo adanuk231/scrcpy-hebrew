@@ -207,8 +207,6 @@ fn scrcpy_args(serial: &str, title: &str, o: &Opts) -> Vec<String> {
         serial.into(),
         format!("--window-title={}", title),
         format!("--window-height={}", o.height.max(240)),
-        // no title bar on a phone, ever: the floating strip is its handle
-        "--window-borderless".into(),
         // born off-screen, so nothing flashes in the middle of the desktop
         "--window-x=-6000".into(),
         "--window-y=-6000".into(),
@@ -366,6 +364,10 @@ fn start_inner(board: &Board, serial: String, opts: Opts) -> Result<Started, Str
 
     // the unique title was only ever a handle; show the phone's name
     win::rename(hwnd, if opts.name.is_empty() { &serial } else { &opts.name });
+    // no title bar on a phone, ever: the floating strip is its handle. Taken
+    // off here rather than asked for at launch - see strip_frame, it is the
+    // difference between a window that resizes and one that only pretends to
+    win::strip_frame(hwnd);
 
     let opened = win::visible_rect(hwnd).unwrap_or_default();
     let taken: Vec<win::Rect> = {
@@ -856,28 +858,35 @@ fn selftest(what: String) -> i32 {
         println!("scrcpy says the picture is {:?} wide per tall", aspect);
 
         let before = win::visible_rect(hwnd).unwrap_or_default();
+        // the picture has to follow the window, and the client area is where
+        // it is drawn: if the two ever disagree, the window is being resized
+        // around a picture that is not moving
         let seen = |label: &str| {
             let r = win::visible_rect(hwnd).unwrap_or_default();
-            println!("{:<12} {}x{} on screen, {:.4} shape",
-                     label, r.w(), r.h(), r.w() as f64 / r.h().max(1) as f64);
-            r
+            let (cw, ch) = win::client_size(hwnd).unwrap_or((0, 0));
+            println!("{:<12} {}x{} on screen, {:.4} shape, {}x{} of picture{}",
+                     label, r.w(), r.h(), r.w() as f64 / r.h().max(1) as f64, cw, ch,
+                     if (cw, ch) == (r.w(), r.h()) { "" } else { "   <- MISMATCH" });
+            (r, (cw, ch) == (r.w(), r.h()))
         };
-        seen("as opened:");
+        let (_, mut follows) = seen("as opened:");
 
         // drag the right edge far out, which is what makes the black bars
         win::place_visible(hwnd, before.left, before.top, before.w() + 260, before.h());
-        seen("pulled out:");
+        follows &= seen("pulled out:").1;
 
         let group = std::collections::HashSet::new();
         magnet::resize_done(&board.pedals.lock().unwrap(), &serial, &before, &group, true);
-        let put = seen("put back:");
+        let (put, still) = seen("put back:");
+        follows &= still;
         let shape = put.w() as f64 / put.h().max(1) as f64;
 
         let wanted = aspect.unwrap_or(shape);
         let off = (shape - wanted).abs();
         println!("off by {:.4}", off);
+        println!("picture follows the window: {}", follows);
         stop_inner(&board, &serial);
-        return if off < 0.02 { 0 } else { 1 };
+        return if off < 0.02 && follows { 0 } else { 1 };
     }
 
     if what == "resizegroup" {

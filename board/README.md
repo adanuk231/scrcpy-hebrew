@@ -102,24 +102,31 @@ while the button is down, moves the window, and posts the same two events the
 shell would have posted - which leaves the group travelling, ctrl peeling one
 off and the snap on landing all working off the one path they already used.
 
-Resizing goes the same way, and has to. The tempting move on a borderless
-window is to put `WS_THICKFRAME` back - the resize cursors return and nothing
-is drawn, since there is no caption to frame. What it actually does is freeze
-the window. The min and max track sizes from `WM_GETMINMAXINFO` are only
-enforced on a window that has a sizing border, and SDL answers that message
-with the size it thinks the window should be, twice, because as far as SDL is
-concerned a borderless window was never resizable. Measured: with the border
-on, a window asked for 300x660 came back 273x600, its size at birth; with it
-off again the same call took. So the phone keeps no frame at all, and the
-resize icon drags a corner by hand.
+Resizing goes the same way, and the reason is worth the paragraph, because
+every tidy-looking route to it is a trap.
 
-One more thing that is not what it looks like: `GetClientRect` does not
-describe a phone window. SDL answers `WM_NCCALCSIZE` for its borderless
-windows, so the client rectangle it reports is the size SDL believes in rather
-than the size on screen - a window measured at 261x573 by both Windows and DWM
-went on calling its client area 318x700, the size it was born at. A phone
-window is all picture anyway, so every measurement here comes from what DWM
-says is on screen.
+**The phone is not started borderless.** `--window-borderless` gives a window
+SDL considers not resizable, and SDL then answers `WM_NCCALCSIZE` by pinning
+the client area to the size the window was born at. Resize that window from
+outside and it works, on paper: the frame grows, `GetWindowRect` reports the
+new size, and the picture inside stays exactly as it was, so what you get is a
+crop. Putting `WS_THICKFRAME` back to earn a resize border makes it worse -
+min and max track sizes are only enforced on a window that has a sizing
+border, and SDL answers that message with the same number twice, so the window
+snaps back to its birth size. Asked for 300x660, it came back 273x600.
+
+Started as an ordinary window it is resizable as far as SDL is concerned, and
+stays that way even after the board takes the title bar, the sizing border and
+the system menu off it: SDL's idea of the window is its own. What is left is
+one rectangle that Windows, DWM and the client area all agree on - measured at
+243x539, then at 380x830 after a resize, all three the same both times, with
+the picture scaling to match.
+
+The `aspect` selftest checks that agreement at every step, because this fails
+silently: a window that resizes around a picture that does not.
+
+With no sizing border there is nothing for the mouse to grab, which is why the
+resize icon exists and drags a corner by hand.
 
 ## Magnet
 
