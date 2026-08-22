@@ -16,7 +16,11 @@
     font: 12px/1 "Segoe UI", system-ui, sans-serif;
   }
 
-  body {
+  /* the icon row sits at the top; the window grows downwards under it when
+     there is a list to show, and the grown part is the only thing that can
+     cover the phone, so it is given back the moment the list closes */
+  #row {
+    height: 30px;
     display: flex;
     align-items: center;
     justify-content: center;
@@ -26,7 +30,10 @@
   /* the space between the icons is the handle the phone is dragged by */
   #grip {
     position: absolute;
-    inset: 0;
+    top: 0;
+    left: 0;
+    right: 0;
+    height: 30px;
   }
 
   #size { cursor: nwse-resize; }
@@ -53,6 +60,39 @@
   svg { width: 15px; height: 15px; }
   svg [fill="none"] { stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; }
 
+  button.flash { color: #ff8f8f; }
+
+  /* the phones that are not out yet, hanging under the icons */
+  #list {
+    margin: 2px auto 0;
+    width: max-content;
+    max-width: 100%;
+    display: none;
+    flex-direction: column;
+    gap: 1px;
+    padding: 4px;
+    border-radius: 9px;
+    background: rgba(22, 24, 28, 0.94);
+    box-shadow: 0 6px 18px rgba(0, 0, 0, 0.5);
+  }
+
+  #list.open { display: flex; }
+
+  #list button {
+    width: auto;
+    height: 24px;
+    padding: 0 10px;
+    display: block;
+    text-align: start;
+    white-space: nowrap;
+    border-radius: 6px;
+    filter: none;
+    color: rgba(255, 255, 255, 0.86);
+    font: inherit;
+  }
+
+  #list button:hover { background: rgba(255, 255, 255, 0.12); color: #fff; }
+
   .dots {
     width: 12px;
     height: 12px;
@@ -63,6 +103,8 @@
 </style>
 
 <div id="grip"></div>
+
+<div id="row">
 
 <button id="move" title="drag the phone"><span class="dots"></span></button>
 
@@ -84,22 +126,88 @@
   </svg>
 </button>
 
+<button id="add" title="mirror another phone beside this one">
+  <svg viewBox="0 0 16 16" aria-hidden="true">
+    <path d="M8 3.2v9.6M3.2 8h9.6" fill="none" stroke-width="1.7"/>
+  </svg>
+</button>
+
 <button id="stop" class="warm" title="stop mirroring">
   <svg viewBox="0 0 16 16" aria-hidden="true">
     <path d="M4.5 4.5l7 7M11.5 4.5l-7 7" fill="none" stroke-width="1.7"/>
   </svg>
 </button>
 
+</div>
+
+<div id="list"></div>
+
 <script>
   const invoke = window.__TAURI__.core.invoke;
   const listen = window.__TAURI__.event.listen;
-
+  const emit = window.__TAURI__.event.emit;
+  const ROW = 30;
+  const listEl = document.getElementById("list");
+  const addEl = document.getElementById("add");
   let target = null;
 
   listen("strip-target", (event) => {
     target = event.payload;
     document.getElementById("skin").classList.toggle("on", !!(target && target.skin));
+    shut();
   });
+
+  /* The window is only as tall as the icons unless a list is open: anything
+     taller sits over the phone and would swallow taps meant for it. */
+  function height(px) {
+    invoke("strip_height", { px });
+  }
+
+  function shut() {
+    if (!listEl.classList.contains("open")) return;
+    listEl.classList.remove("open");
+    listEl.textContent = "";
+    height(ROW);
+  }
+
+  /* The board knows which phones are plugged in, which are already out, and
+     what each one was last set to, so it does the choosing and the starting.
+     The strip only asks, and shows the answer when there is more than one. */
+  document.getElementById("add").addEventListener("click", () => {
+    if (listEl.classList.contains("open")) {
+      shut();
+      return;
+    }
+    emit("strip-add", { beside: target && target.serial });
+  });
+
+  listen("strip-choices", (event) => {
+    const others = event.payload || [];
+    if (!others.length) {
+      // nothing else is plugged in: say so where the eye already is
+      addEl.classList.add("flash");
+      setTimeout(() => addEl.classList.remove("flash"), 900);
+      return;
+    }
+    listEl.textContent = "";
+    for (const other of others) {
+      const button = document.createElement("button");
+      button.textContent = other.name;
+      button.title = other.serial;
+      button.addEventListener("click", () => {
+        emit("strip-start", { serial: other.serial, beside: target && target.serial });
+        shut();
+      });
+      listEl.appendChild(button);
+    }
+    listEl.classList.add("open");
+    height(ROW + listEl.scrollHeight + 6);
+  });
+
+  // clicking any of the other icons, or the phone, puts the list away
+  for (const id of ["move", "skin", "size", "pick", "stop", "grip"]) {
+    document.getElementById(id).addEventListener("pointerdown", shut);
+  }
 
   // anywhere that is not an icon drags the phone, and so does the grip icon
   for (const el of [document.getElementById("grip"), document.getElementById("move")]) {

@@ -180,6 +180,31 @@ pub fn settle(moving: &win::Rect, others: &[win::Rect], area: &win::Rect) -> (i3
     (dx + fx, dy + fy)
 }
 
+/// Put everything stuck to `leader` directly behind it, as one block.
+///
+/// Two phones touching are one thing on the desk, and one thing cannot have
+/// another window through the middle of it - so whichever of them comes to the
+/// front brings its row with it. Phones that are not touching are left alone:
+/// they are separate windows and are meant to behave like it.
+pub fn stack(leader: &str, rects: &HashMap<String, win::Rect>,
+             pedals: &HashMap<String, Pedal>) {
+    let mut after = match pedals.get(leader) {
+        Some(pedal) => pedal.hwnd,
+        None => return,
+    };
+    let mut row: Vec<String> = cluster(leader, rects)
+        .into_iter()
+        .filter(|serial| serial != leader)
+        .collect();
+    row.sort();                       // a set has no order; any steady one does
+    for serial in row {
+        if let Some(pedal) = pedals.get(&serial) {
+            win::place_behind(pedal.hwnd, after);
+            after = pedal.hwnd;
+        }
+    }
+}
+
 pub fn geometry(pedals: &HashMap<String, Pedal>) -> HashMap<String, win::Rect> {
     pedals
         .iter()
@@ -401,6 +426,7 @@ pub fn run(app: tauri::AppHandle, drags: std::sync::mpsc::Receiver<win::Drag>) {
     let mut grabbed: Option<win::Rect> = None;
     let mut aiming: Option<String> = None;
     let mut aimed_at = Instant::now();
+    let mut was_front = 0isize;
     let mut last: HashMap<String, win::Rect> = HashMap::new();
     let mut still_since = Instant::now();
     let mut unsaved = false;
@@ -422,6 +448,7 @@ pub fn run(app: tauri::AppHandle, drags: std::sync::mpsc::Receiver<win::Drag>) {
 
         // read before the pedals are locked: the strip's own handle lives
         // beside the aim, and nothing may take that lock while holding this one
+        let fg = win::foreground();
         let (strip_hwnd, cursor) = {
             let aim = app.state::<std::sync::Mutex<crate::Aim>>();
             let hwnd = aim.lock().unwrap().hwnd;
@@ -468,6 +495,12 @@ pub fn run(app: tauri::AppHandle, drags: std::sync::mpsc::Receiver<win::Drag>) {
                         };
                         anchor = rects.get(&serial).map(|r| (r.left, r.top)).unwrap_or((0, 0));
                         grabbed = rects.get(&serial).copied();
+                        // picking a phone up brings it to the front, row and
+                        // all - it is what dragging a window has always meant,
+                        // and the strip's handle never activates anything, so
+                        // without this a dragged phone stays buried
+                        win::raise(hwnd);
+                        stack(&serial, &rects, &pedals);
                         dragging = Some(serial);
                     }
                 }
@@ -504,12 +537,25 @@ pub fn run(app: tauri::AppHandle, drags: std::sync::mpsc::Receiver<win::Drag>) {
                                 }
                             }
                         }
+                        // it may have joined a different row than it left
+                        stack(&serial, &geometry(&pedals), &pedals);
                         dragging = None;
                         group.clear();
                         solo = false;
                         grabbed = None;
                     }
                 }
+            }
+        }
+
+        // z-order only changes when a window is activated or raised, so this
+        // is the moment to put a row back together: something has just come to
+        // the front, and if it is one of a stuck pair the other is now behind
+        // whatever else the user was looking at
+        if fg != was_front {
+            was_front = fg;
+            if let Some(serial) = pedals.iter().find(|(_, p)| p.hwnd == fg).map(|(s, _)| s.clone()) {
+                stack(&serial, &rects, &pedals);
             }
         }
 
@@ -527,7 +573,7 @@ pub fn run(app: tauri::AppHandle, drags: std::sync::mpsc::Receiver<win::Drag>) {
                 .clone()
                 .or_else(|| of(under))
                 .or_else(|| if under == strip_hwnd && under != 0 { aiming.clone() } else { None })
-                .or_else(|| of(win::foreground()))
+                .or_else(|| of(fg))
                 .and_then(|serial| {
                     match (rects.get(&serial), pedals.get(&serial)) {
                         (Some(r), Some(p)) => Some((serial, *r, p.skin)),

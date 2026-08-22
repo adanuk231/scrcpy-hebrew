@@ -34,6 +34,7 @@ extern "system" {
     fn GetCursorPos(point: *mut Point) -> i32;
     fn WindowFromPoint(point: Point) -> isize;
     fn GetAncestor(hwnd: isize, flags: u32) -> isize;
+    fn GetWindow(hwnd: isize, cmd: u32) -> isize;
 }
 
 #[link(name = "shell32")]
@@ -348,6 +349,36 @@ pub fn place(hwnd: isize, x: i32, y: i32, w: i32, h: i32) {
 
 pub fn show(hwnd: isize, visible: bool) {
     unsafe { ShowWindow(hwnd, if visible { SW_SHOWNA } else { SW_HIDE }) };
+}
+
+/// The first window you would actually see underneath this one.
+///
+/// Used to check that a row of stuck phones is one unbroken block. The plain
+/// answer from the shell is no use for that: the stacking order is full of
+/// invisible and empty top-level windows that every process leaves lying
+/// about, and any of them can sit between two windows that look adjacent.
+pub fn next_visible_below(hwnd: isize) -> isize {
+    const GW_HWNDNEXT: u32 = 2;
+    let mut next = unsafe { GetWindow(hwnd, GW_HWNDNEXT) };
+    while next != 0 {
+        let showing = unsafe { IsWindowVisible(next) != 0 } && !is_minimised(next);
+        let real = rect_of(next).map_or(false, |r| r.w() > 1 && r.h() > 1);
+        if showing && real {
+            return next;
+        }
+        next = unsafe { GetWindow(next, GW_HWNDNEXT) };
+    }
+    0
+}
+
+/// Put a window immediately behind another one, without disturbing either.
+///
+/// This is what keeps a row of stuck phones together: they are one thing to
+/// look at, so nothing may come between them in the stacking order.
+pub fn place_behind(hwnd: isize, after: isize) {
+    unsafe {
+        SetWindowPos(hwnd, after, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
 }
 
 pub fn raise(hwnd: isize) {

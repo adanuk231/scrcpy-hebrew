@@ -138,6 +138,38 @@ any bigger than that is stretching what it has. The tests that only measure a
 window use 720 because it starts faster, but the branch that leaves phones
 running for real use starts them the way the app does.
 
+### Opening another one
+
+The `+` on the strip mirrors another phone **against this one**: flush to its
+side, matched in height, so the row is level and one slab. With one other phone
+plugged in it just opens; with several, a list drops under the icons and closes
+again the moment you pick one. With none, the `+` blinks red rather than
+opening an empty menu.
+
+Pressing play on the board does the same thing - a phone opened while another
+is already out lands against the row rather than wherever it feels like.
+
+The board is what answers the `+`, not the strip: it is the side that knows
+what is plugged in, what is already out, and what each phone was last set to.
+The strip asks and shows the answer.
+
+Where a phone opens, in order: against the phone you opened it from, if one is
+out; where you left it, if that spot is already against the row or if it is
+coming out alone; and failing both, to the right of everything already out.
+
+### One row, one window
+
+Two phones stuck together are one thing to look at, and one thing cannot have
+another window through the middle of it. Bring either of them to the front and
+its whole row comes with it, in one block. Phones that are not touching are
+left alone - they are separate windows and behave like it.
+
+Picking a phone up raises it too. Dragging a window has always meant bringing
+it to the front, and the strip's handle deliberately never activates anything,
+so without that a dragged phone would stay buried under whatever you were
+working in. It is raised without being activated, so your editor keeps the
+keyboard.
+
 ## Magnet
 
 Always on, nothing to switch.
@@ -273,6 +305,7 @@ scrcpy-board.exe selftest readopt    # pick up phones left running, then close
 scrcpy-board.exe selftest autostart  # the Run key round-trips and restores
 scrcpy-board.exe selftest drags      # what the shell reports while you drag a phone
 scrcpy-board.exe selftest hover      # which phone is under a point, and hand-made drags
+scrcpy-board.exe selftest together   # a phone opens against another, and they stack as one
 scrcpy-board.exe selftest remember   # a phone opens where it was last left
 scrcpy-board.exe selftest lineup     # lining a row up leaves it where it stands
 scrcpy-board.exe selftest aspect     # pull a phone out of shape, then put it back

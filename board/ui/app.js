@@ -4,6 +4,7 @@
 
 const invoke = window.__TAURI__.core.invoke;
 const listen = window.__TAURI__.event.listen;
+const emit = window.__TAURI__.event.emit;
 const appWindow = window.__TAURI__.window.getCurrentWindow();
 const LogicalSize = window.__TAURI__.window.LogicalSize;
 
@@ -250,10 +251,20 @@ function showPage(page) {
 
 // ------------------------------------------------------------- actions ---
 
-async function start(serial) {
+/** Which phone a new one should be opened against: the last one out, in tab
+    order, so phones pile up into one row instead of landing on each other. */
+function anchorFor(serial) {
+  const out = order.filter((s) => s !== serial && live.has(s));
+  return out.length ? out[out.length - 1] : null;
+}
+
+async function start(serial, beside) {
   say("connecting...");
   try {
-    await invoke("start", { serial, opts: optionsFor(serial) });
+    const chosen = beside === undefined ? anchorFor(serial) : beside;
+    // not stored with the rest: where a phone opens is about this moment, not
+    // a setting of the phone
+    await invoke("start", { serial, opts: { ...optionsFor(serial), beside: chosen } });
     live.add(serial);
     say("");
   } catch (err) {
@@ -476,6 +487,32 @@ listen("skin-changed", (e) => {
 
 listen("pick", (e) => {
   if (caps.has(e.payload)) select(e.payload);
+});
+
+/** The phones that are plugged in and not out yet. */
+function others(except) {
+  return order
+    .filter((serial) => serial !== except && !live.has(serial))
+    .map((serial) => ({ serial, name: (caps.get(serial) || {}).name || serial }));
+}
+
+// the + on the strip. The board is the one that knows what is plugged in and
+// what each phone was last set to, so it decides: one candidate goes straight
+// up beside the phone the icons are on, and anything else goes back as a list
+// for the strip to show
+listen("strip-add", (e) => {
+  const beside = (e.payload || {}).beside || null;
+  const waiting = others(beside);
+  if (waiting.length === 1) {
+    start(waiting[0].serial, beside);
+    return;
+  }
+  emit("strip-choices", waiting);
+});
+
+listen("strip-start", (e) => {
+  const { serial, beside } = e.payload || {};
+  if (caps.has(serial) && !live.has(serial)) start(serial, beside || null);
 });
 
 const saved = load();

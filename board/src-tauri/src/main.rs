@@ -199,6 +199,10 @@ struct Opts {
     skin: bool,
     height: u32,
     name: String,
+    /// The phone to open flush against, when one is already out. Nothing to do
+    /// with how scrcpy is started: it only decides where the window lands.
+    #[serde(default)]
+    beside: Option<String>,
 }
 
 fn scrcpy_args(serial: &str, title: &str, o: &Opts) -> Vec<String> {
@@ -269,45 +273,67 @@ fn parking_spot(rects: &[win::Rect], w: i32, h: i32) -> (i32, i32) {
     (x, y)
 }
 
+/// Drop a box where it wants to go: onto a screen the user still has, clear of
+/// everything already out, and clicked onto whatever it lands beside.
+fn land(want: win::Rect, taken: &[win::Rect]) -> (i32, i32, i32, i32) {
+    let (w, h) = (want.w(), want.h());
+    let area = win::work_area_at((want.left + want.right) / 2, (want.top + want.bottom) / 2);
+    let x = want.left.max(area.left).min((area.right - w).max(area.left));
+    let y = want.top.max(area.top).min((area.bottom - h).max(area.top));
+    let want = win::Rect { left: x, top: y, right: x + w, bottom: y + h };
+    let (dx, dy) = magnet::settle(&want, taken, &area);
+    (x + dx, y + dy, w, h)
+}
+
 /// Where a phone should open, and how big.
 ///
-/// Where you left it, if we have ever seen it. The screen it was on may have
-/// gone since, and something else may have been put in its place, so the
-/// remembered box is pulled back onto a monitor and then dropped the same way
-/// a dragged phone is dropped: pushed clear of anything it lands on, and
-/// clicked onto whatever it lands beside.
-fn opening_spot(serial: &str, opts: &Opts, aspect: f64, taken: &[win::Rect])
-                -> (i32, i32, i32, i32) {
+/// Where you left it, if we have ever seen it and it is coming out on its own.
+/// If another phone is already out it joins that one instead: flush against its
+/// side and matched in height, which is the row you would have dragged it into
+/// anyway. Unless the place it remembers is already against that row, in which
+/// case it was left there on purpose and goes straight back.
+fn opening_spot(serial: &str, opts: &Opts, aspect: f64, taken: &[win::Rect],
+                beside: Option<win::Rect>) -> (i32, i32, i32, i32) {
     // a phone window is all picture, so the height asked for is the height of
     // the window, and the width follows from the shape
     let asked = {
         let h = (opts.height as i32).max(240);
         (((h as f64) * aspect).round() as i32, h)
     };
-    let spot = match places::of(serial) {
-        Some(spot) => spot,
-        None => {
-            let (x, y) = parking_spot(taken, asked.0, asked.1);
-            return (x, y, asked.0, asked.1);
+
+    if let Some(spot) = places::of(serial) {
+        // the size it was last dragged to, unless the height has been dialled
+        // to something else since, in which case that is the more recent
+        // instruction. Either way the shape is the picture's, so a phone that
+        // has been turned on its side is not squeezed back upright.
+        let (w, h) = if spot.asked == opts.height {
+            (spot.w, ((spot.w as f64) / aspect).round() as i32)
+        } else {
+            asked
+        };
+        let want = win::Rect {
+            left: spot.x, top: spot.y, right: spot.x + w, bottom: spot.y + h,
+        };
+        if beside.is_none() || taken.iter().any(|t| magnet::adjacent(&want, t)) {
+            return land(want, taken);
         }
-    };
+    }
 
-    // the size it was last dragged to, unless the height has been dialled to
-    // something else since, in which case that is the more recent instruction.
-    // Either way the shape is the picture's, so a phone that has been turned
-    // on its side is not squeezed back upright.
-    let (w, h) = if spot.asked == opts.height {
-        (spot.w, ((spot.w as f64) / aspect).round() as i32)
-    } else {
-        asked
-    };
+    if let Some(anchor) = beside {
+        // matched in height so the row is level, and each phone keeps its own
+        // shape, so two of different proportions still sit flush
+        let h = anchor.h();
+        let w = ((h as f64) * aspect).round() as i32;
+        let area = win::work_area_at(anchor.left, anchor.top);
+        // its right, unless the row has run out of desk on that side
+        let left = if anchor.right + w <= area.right { anchor.right } else { anchor.left - w };
+        return land(win::Rect {
+            left, top: anchor.top, right: left + w, bottom: anchor.top + h,
+        }, taken);
+    }
 
-    let area = win::work_area_at(spot.x + spot.w / 2, spot.y + spot.h / 2);
-    let x = spot.x.max(area.left).min((area.right - w).max(area.left));
-    let y = spot.y.max(area.top).min((area.bottom - h).max(area.top));
-    let want = win::Rect { left: x, top: y, right: x + w, bottom: y + h };
-    let (dx, dy) = magnet::settle(&want, taken, &area);
-    (x + dx, y + dy, w, h)
+    let (x, y) = parking_spot(taken, asked.0, asked.1);
+    (x, y, asked.0, asked.1)
 }
 
 #[tauri::command]
@@ -370,15 +396,20 @@ fn start_inner(board: &Board, serial: String, opts: Opts) -> Result<Started, Str
     win::strip_frame(hwnd);
 
     let opened = win::visible_rect(hwnd).unwrap_or_default();
-    let taken: Vec<win::Rect> = {
+    let (taken, anchor) = {
         let pedals = board.pedals.lock().unwrap();
-        pedals.values().filter_map(|p| win::visible_rect(p.hwnd)).collect()
+        let taken: Vec<win::Rect> =
+            pedals.values().filter_map(|p| win::visible_rect(p.hwnd)).collect();
+        let anchor = opts.beside.as_ref()
+            .and_then(|other| pedals.get(other))
+            .and_then(|p| win::visible_rect(p.hwnd));
+        (taken, anchor)
     };
     // the shape of the picture, not of the window it happens to have opened
     // in: the window is about to be told what to be
     let aspect = video_aspect(&serial)
         .unwrap_or_else(|| opened.w().max(1) as f64 / opened.h().max(1) as f64);
-    let (x, y, w, h) = opening_spot(&serial, &opts, aspect, &taken);
+    let (x, y, w, h) = opening_spot(&serial, &opts, aspect, &taken, anchor);
     win::place_visible(hwnd, x, y, w, h);
     places::asked_for(&serial, opts.height);
     if opts.skin {
@@ -546,7 +577,7 @@ fn build_strip(app: &tauri::AppHandle) -> tauri::Result<()> {
     let strip = tauri::WebviewWindowBuilder::new(
         app, "strip", tauri::WebviewUrl::App("strip.html".into()))
         .title("board strip")
-        .inner_size(152.0, 30.0)
+        .inner_size(178.0, 30.0)
         .decorations(false)
         .transparent(true)
         .always_on_top(true)
@@ -706,6 +737,24 @@ fn drag_by_hand(hwnd: isize, strip: isize) {
     });
 }
 
+/// Let the strip grow downwards to show a list, and shrink back after.
+///
+/// Its own window API is not used for this: the strip is deliberately not
+/// resizable, and the height has to hold against the magnet loop moving the
+/// window thirty times a second, which it does because that move carries
+/// SWP_NOSIZE. Anything taller than the icons covers the phone, so the height
+/// is given back the moment the list closes.
+#[tauri::command]
+fn strip_height(app: tauri::AppHandle, px: f64) {
+    let scale = app.get_webview_window("strip")
+        .and_then(|w| w.scale_factor().ok())
+        .unwrap_or(1.0);
+    let hwnd = app.state::<Mutex<Aim>>().lock().unwrap().hwnd;
+    if let Some(r) = win::rect_of(hwnd) {
+        win::place(hwnd, r.left, r.top, r.w(), ((px * scale).round() as i32).max(1));
+    }
+}
+
 #[tauri::command]
 fn strip_skin(app: tauri::AppHandle, state: State<Board>) {
     if let Some(serial) = aimed_at(&app) {
@@ -796,6 +845,7 @@ fn start_daemon() {
 ///   selftest keep       every phone, left running
 ///   selftest readopt    pick up phones left running, then close them
 ///   selftest hover      which phone is under a point, and hand-made drags
+///   selftest together   a phone opens against another, and they stack as one
 ///   selftest remember   a phone opens where it was last left
 ///   selftest lineup     lining a row up leaves it where it stands
 /// What the app itself would start a phone with: the picture at the phone's
@@ -819,6 +869,7 @@ fn test_opts(name: &str, keyboard: &str) -> Opts {
         skin: false,
         height: 700,
         name: name.into(),
+        beside: None,
     }
 }
 
@@ -1110,6 +1161,59 @@ fn selftest(what: String) -> i32 {
             stop_inner(&board, serial);
         }
         return if flush && level && stayed { 0 } else { 1 };
+    }
+
+    if what == "together" {
+        // a second phone opens against the first, and the pair behaves as one
+        // window in the stacking order
+        let list = devices();
+        if list.len() < 2 {
+            println!("needs two phones");
+            return 1;
+        }
+        let (first, second) = (list[0].clone(), list[1].clone());
+        if let Err(e) = start_inner(&board, first.0.clone(), live_opts(&first.1, &first.2)) {
+            println!("{} FAILED: {}", first.1, e);
+            return 1;
+        }
+        let mut opts = live_opts(&second.1, &second.2);
+        opts.beside = Some(first.0.clone());
+        if let Err(e) = start_inner(&board, second.0.clone(), opts) {
+            println!("{} FAILED: {}", second.1, e);
+            return 1;
+        }
+
+        let pedals = board.pedals.lock().unwrap();
+        let rects = magnet::geometry(&pedals);
+        let (a, b) = (rects[&first.0], rects[&second.0]);
+        println!("{:<12} {},{} {}x{}", first.1, a.left, a.top, a.w(), a.h());
+        println!("{:<12} {},{} {}x{}", second.1, b.left, b.top, b.w(), b.h());
+        let flush = magnet::adjacent(&a, &b);
+        let level = (a.top - b.top).abs() <= 2 && (a.h() - b.h()).abs() <= 2;
+        println!("flush against it: {}", flush);
+        println!("same height:      {}", level);
+
+        // put the first one in front, and the second should come with it
+        let (top, under) = (pedals[&first.0].hwnd, pedals[&second.0].hwnd);
+        win::raise(top);
+        magnet::stack(&first.0, &rects, &pedals);
+        std::thread::sleep(Duration::from_millis(200));
+        let behind = win::next_visible_below(top);
+        println!("directly behind:  {} (want {})", behind, under);
+
+        // ...and the other way round, since either of them can be picked up
+        win::raise(under);
+        magnet::stack(&second.0, &rects, &pedals);
+        std::thread::sleep(Duration::from_millis(200));
+        let other_way = win::next_visible_below(under);
+        println!("and reversed:     {} (want {})", other_way, top);
+
+        drop(pedals);
+        for (serial, _, _) in &list {
+            stop_inner(&board, serial);
+        }
+        let ok = flush && level && behind == under && other_way == top;
+        return if ok { 0 } else { 1 };
     }
 
     if what == "autostart" {
@@ -1473,7 +1577,8 @@ fn main() {
             probe, start, stop, running, set_skin, arrange,
             focus_device, action, rotate, status, open_logs,
             autostart_state, set_autostart, hide_board, settled,
-            strip_drag, strip_resize, strip_skin, strip_stop, strip_pick
+            strip_drag, strip_resize, strip_skin, strip_stop, strip_pick,
+            strip_height
         ])
         .run(tauri::generate_context!())
         .expect("board failed to start");
