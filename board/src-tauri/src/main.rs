@@ -20,7 +20,7 @@ use std::io::Write;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -50,16 +50,71 @@ struct Board {
 // ------------------------------------------------------------- plumbing ----
 
 fn run(program: &str, args: &[&str]) -> Result<String, String> {
-    let out = Command::new(program)
+    run_for(program, args, Duration::from_secs(15))
+}
+
+/// Run a program to the end and return what it printed - but never for longer
+/// than `limit`: a stuck child is killed, not waited on.
+///
+/// Output goes through delete-on-close temp files rather than pipes. A call
+/// that happens to start the adb server (the first one after login) hands the
+/// server our handles for the rest of its life, and a pipe then never reaches
+/// EOF - which is how the board once sat frozen from sign-in onwards.
+fn run_for(program: &str, args: &[&str], limit: Duration) -> Result<String, String> {
+    let out = scratch()?;
+    let err = scratch()?;
+    let mut child = Command::new(program)
         .args(args)
         .creation_flags(CREATE_NO_WINDOW)
         .stdin(Stdio::null())
-        .output()
+        .stdout(Stdio::from(out.try_clone().map_err(|e| e.to_string())?))
+        .stderr(Stdio::from(err.try_clone().map_err(|e| e.to_string())?))
+        .spawn()
         .map_err(|e| format!("{}: {}", program, e))?;
-    if !out.status.success() && out.stdout.is_empty() {
-        return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
+    let deadline = Instant::now() + limit;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(25)),
+            Ok(None) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(format!("{} gave no answer in {}s", program, limit.as_secs()));
+            }
+            Err(e) => return Err(format!("{}: {}", program, e)),
+        }
+    };
+    let stdout = read_back(out);
+    if !status.success() && stdout.is_empty() {
+        return Err(read_back(err).trim().to_string());
     }
-    Ok(String::from_utf8_lossy(&out.stdout).to_string())
+    Ok(stdout)
+}
+
+/// A temp file that Windows deletes once the last handle to it is gone -
+/// including a handle an adb server walked off with.
+fn scratch() -> Result<std::fs::File, String> {
+    use std::os::windows::fs::OpenOptionsExt;
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    const FILE_FLAG_DELETE_ON_CLOSE: u32 = 0x0400_0000;
+    let name = format!("scrcpy-board-{}-{}.out",
+                       std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed));
+    std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create_new(true)
+        .share_mode(7)                        // read | write | delete
+        .custom_flags(FILE_FLAG_DELETE_ON_CLOSE)
+        .open(std::env::temp_dir().join(name))
+        .map_err(|e| format!("temp file: {}", e))
+}
+
+fn read_back(mut file: std::fs::File) -> String {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut bytes = Vec::new();
+    let _ = file.seek(SeekFrom::Start(0));
+    let _ = file.read_to_end(&mut bytes);
+    String::from_utf8_lossy(&bytes).to_string()
 }
 
 /// scrcpy_hebrew.py lives above the app; in a dev build the exe is buried
@@ -174,15 +229,24 @@ fn publish_windows(pedals: &HashMap<String, Pedal>) {
 
 // ------------------------------------------------------------- commands ----
 
+// The commands that talk to a phone are async so they run off the main
+// thread: a phone slow to answer must never take the tray and the window
+// down with it.
+
 #[tauri::command]
-fn probe() -> Result<serde_json::Value, String> {
+async fn probe() -> Result<serde_json::Value, String> {
+    probe_report()
+}
+
+fn probe_report() -> Result<serde_json::Value, String> {
     let script = engine().ok_or("scrcpy_hebrew.py not found next to the app")?;
     let (exe, pre) = python(false);
     let mut args: Vec<String> = pre;
     args.push(script.to_string_lossy().to_string());
     args.push("capabilities".to_string());
     let refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-    let out = run(&exe, &refs)?;
+    // several adb round trips per phone, each allowed 20s by the script
+    let out = run_for(&exe, &refs, Duration::from_secs(90))?;
     serde_json::from_str(&out).map_err(|e| format!("{}: {}", e, out))
 }
 
@@ -499,7 +563,7 @@ fn focus_device(state: State<Board>, serial: String) {
 /// scrcpy's own shortcuts: no restart, no key-injection guesswork, and they
 /// still work on a phone running with --no-control.
 #[tauri::command]
-fn action(serial: String, what: String) -> Result<String, String> {
+async fn action(serial: String, what: String) -> Result<String, String> {
     let key = match what.as_str() {
         "back" => "4",
         "home" => "3",
@@ -516,7 +580,7 @@ fn action(serial: String, what: String) -> Result<String, String> {
 }
 
 #[tauri::command]
-fn rotate(serial: String, locked: bool, landscape: bool) -> Result<String, String> {
+async fn rotate(serial: String, locked: bool, landscape: bool) -> Result<String, String> {
     let accel = if locked { "0" } else { "1" };
     run(
         "adb",
@@ -541,7 +605,7 @@ struct Status {
 }
 
 #[tauri::command]
-fn status(serial: String) -> Result<Status, String> {
+async fn status(serial: String) -> Result<Status, String> {
     let dump = run("adb", &["-s", &serial, "shell", "dumpsys", "battery"])?;
     let mut battery = -1;
     let mut charging = false;
@@ -874,7 +938,7 @@ fn test_opts(name: &str, keyboard: &str) -> Opts {
 }
 
 fn devices() -> Vec<(String, String, String)> {
-    let report = match probe() {
+    let report = match probe_report() {
         Ok(r) => r,
         Err(e) => {
             println!("probe failed: {}", e);

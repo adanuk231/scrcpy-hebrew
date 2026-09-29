@@ -53,6 +53,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import tkinter as tk
@@ -287,11 +288,17 @@ def char_for(vk, scan, hkl):
 
 def adb(serial, *args, timeout=20):
     cmd = ["adb"] + (["-s", serial] if serial else []) + list(args)
+    # Output goes to a temp file, not a pipe. When this is the call that has
+    # to start the adb server (first thing after login), the server inherits
+    # our handles and keeps them for its whole life - a pipe then never reaches
+    # EOF and subprocess.run waits on it forever, timeout or not.
     try:
-        return subprocess.run(cmd, capture_output=True, text=True,
-                              encoding="utf-8", errors="replace",
-                              timeout=timeout,
-                              creationflags=0x08000000).stdout   # NO_WINDOW
+        with tempfile.TemporaryFile() as out:
+            subprocess.run(cmd, stdin=subprocess.DEVNULL, stdout=out,
+                           stderr=subprocess.DEVNULL, timeout=timeout,
+                           creationflags=0x08000000)             # NO_WINDOW
+            out.seek(0)
+            return out.read().decode("utf-8", "replace").replace("\r\n", "\n")
     except Exception as exc:
         dlog("adb %r failed: %r" % (args, exc))
         return ""
